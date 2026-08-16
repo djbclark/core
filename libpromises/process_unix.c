@@ -33,6 +33,29 @@
 
 #define SLEEP_POLL_TIMEOUT_NS 10000000
 
+/*
+ * Monotonic timestamp in nanoseconds, for measuring how long the poll loops
+ * below have actually waited.
+ *
+ * nanosleep() may sleep considerably longer than requested -- on Darwin/arm64 a
+ * 10ms request routinely takes ~45ms -- so a loop that assumes each iteration
+ * costs exactly SLEEP_POLL_TIMEOUT_NS is counting iterations, not measuring a
+ * duration, and overshoots its timeout by whatever the platform's granularity
+ * happens to be.
+ *
+ * Same CLOCK_MONOTONIC fallback as EvalContextEventStart() in eval_context.c.
+ */
+static int64_t ProcessPollTimeNs(void)
+{
+    struct timespec ts;
+#ifdef CLOCK_MONOTONIC
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+#else
+    clock_gettime(CLOCK_REALTIME, &ts);
+#endif
+    return (int64_t) ts.tv_sec * 1000000000LL + ts.tv_nsec;
+}
+
 
 /*
  * Wait until process specified by #pid is stopped due to SIGSTOP signal.
@@ -45,7 +68,9 @@
  */
 static bool ProcessWaitUntilStopped(pid_t pid, long timeout_ns)
 {
-    while (timeout_ns > 0)
+    const int64_t deadline = ProcessPollTimeNs() + timeout_ns;
+
+    while (true)
     {
         switch (GetProcessState(pid))
         {
@@ -61,9 +86,15 @@ static bool ProcessWaitUntilStopped(pid_t pid, long timeout_ns)
             return false;
         }
 
+        const int64_t remaining_ns = deadline - ProcessPollTimeNs();
+        if (remaining_ns <= 0)
+        {
+            break;
+        }
+
         struct timespec ts = {
             .tv_sec = 0,
-            .tv_nsec = MIN(SLEEP_POLL_TIMEOUT_NS, timeout_ns),
+            .tv_nsec = (long) MIN((int64_t) SLEEP_POLL_TIMEOUT_NS, remaining_ns),
         };
 
         while (nanosleep(&ts, &ts) < 0)
@@ -73,8 +104,6 @@ static bool ProcessWaitUntilStopped(pid_t pid, long timeout_ns)
                 ProgrammingError("Invalid timeout for nanosleep");
             }
         }
-
-        timeout_ns = MAX(0, timeout_ns - SLEEP_POLL_TIMEOUT_NS);
     }
 
     return false;
@@ -87,7 +116,9 @@ static bool ProcessWaitUntilExited(pid_t pid, long timeout_ns)
 {
     assert(timeout_ns < 1000000000);
 
-    while (timeout_ns > 0)
+    const int64_t deadline = ProcessPollTimeNs() + timeout_ns;
+
+    while (true)
     {
         switch (GetProcessState(pid))
         {
@@ -106,9 +137,15 @@ static bool ProcessWaitUntilExited(pid_t pid, long timeout_ns)
             return false;
         }
 
+        const int64_t remaining_ns = deadline - ProcessPollTimeNs();
+        if (remaining_ns <= 0)
+        {
+            break;
+        }
+
         struct timespec ts = {
             .tv_sec = 0,
-            .tv_nsec = MIN(SLEEP_POLL_TIMEOUT_NS, timeout_ns),
+            .tv_nsec = (long) MIN((int64_t) SLEEP_POLL_TIMEOUT_NS, remaining_ns),
         };
 
         Log(LOG_LEVEL_DEBUG,
@@ -122,8 +159,6 @@ static bool ProcessWaitUntilExited(pid_t pid, long timeout_ns)
                 ProgrammingError("Invalid timeout for nanosleep");
             }
         }
-
-        timeout_ns = MAX(0, timeout_ns - SLEEP_POLL_TIMEOUT_NS);
     }
 
     return false;
