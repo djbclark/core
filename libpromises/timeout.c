@@ -26,11 +26,40 @@
 #include <timeout.h>
 #include <process_lib.h>
 
+/* Set while a timeout alarm is pending. cf_popen()'s child consults it to
+ * decide whether to lead a process group of its own; only a child that may
+ * have to be killed as a tree needs one. */
+static bool TIMEOUT_ARMED = false; /* GLOBAL_X */
+
+/* Set by TimeOut() when the alarm fires, so that the caller can tell "the
+ * command timed out" from "the command finished". Written from a signal
+ * handler, hence volatile sig_atomic_t. */
+static volatile sig_atomic_t TIMEOUT_FIRED = 0; /* GLOBAL_X */
+
 void SetTimeOut(int timeout)
 {
     ALARM_PID = -1;
+    TIMEOUT_ARMED = true;
+    TIMEOUT_FIRED = 0;
     signal(SIGALRM, (void *) TimeOut);
     alarm(timeout);
+}
+
+void ClearTimeOut(void)
+{
+    alarm(0);
+    signal(SIGALRM, SIG_DFL);
+    TIMEOUT_ARMED = false;
+}
+
+bool TimeOutIsArmed(void)
+{
+    return TIMEOUT_ARMED;
+}
+
+bool TimeOutHasFired(void)
+{
+    return TIMEOUT_FIRED != 0;
 }
 
 /*************************************************************************/
@@ -38,6 +67,8 @@ void SetTimeOut(int timeout)
 void TimeOut()
 {
     alarm(0);
+    TIMEOUT_ARMED = false;
+    TIMEOUT_FIRED = 1;
 
     if (ALARM_PID != -1)
     {

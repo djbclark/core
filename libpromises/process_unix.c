@@ -49,11 +49,36 @@ static int64_t ProcessPollTimeNs(void)
 {
     struct timespec ts;
 #ifdef CLOCK_MONOTONIC
-    clock_gettime(CLOCK_MONOTONIC, &ts);
+    xclock_gettime(CLOCK_MONOTONIC, &ts);
 #else
-    clock_gettime(CLOCK_REALTIME, &ts);
+    xclock_gettime(CLOCK_REALTIME, &ts);
 #endif
     return (int64_t) ts.tv_sec * 1000000000LL + ts.tv_nsec;
+}
+
+/*
+ * Nanoseconds left before #deadline, given the current time, keeping the
+ * deadline honest across a clock that steps backwards.
+ *
+ * Without CLOCK_MONOTONIC the helper above reads CLOCK_REALTIME, which an NTP
+ * step can move backwards under us; the deadline would then recede and the loop
+ * would wait for the wall clock to catch up. Whenever time moves backwards
+ * between two reads we move the deadline back by the same amount, so the
+ * remaining budget is preserved rather than extended.
+ *
+ * #deadline and #prev are both updated in place.
+ */
+static int64_t ProcessPollRemainingNs(int64_t *deadline, int64_t *prev)
+{
+    const int64_t now = ProcessPollTimeNs();
+
+    if (now < *prev)
+    {
+        *deadline -= (*prev - now);
+    }
+    *prev = now;
+
+    return *deadline - now;
 }
 
 
@@ -68,7 +93,8 @@ static int64_t ProcessPollTimeNs(void)
  */
 static bool ProcessWaitUntilStopped(pid_t pid, long timeout_ns)
 {
-    const int64_t deadline = ProcessPollTimeNs() + timeout_ns;
+    int64_t prev = ProcessPollTimeNs();
+    int64_t deadline = prev + timeout_ns;
 
     while (true)
     {
@@ -86,7 +112,7 @@ static bool ProcessWaitUntilStopped(pid_t pid, long timeout_ns)
             return false;
         }
 
-        const int64_t remaining_ns = deadline - ProcessPollTimeNs();
+        const int64_t remaining_ns = ProcessPollRemainingNs(&deadline, &prev);
         if (remaining_ns <= 0)
         {
             break;
@@ -116,7 +142,8 @@ static bool ProcessWaitUntilExited(pid_t pid, long timeout_ns)
 {
     assert(timeout_ns < 1000000000);
 
-    const int64_t deadline = ProcessPollTimeNs() + timeout_ns;
+    int64_t prev = ProcessPollTimeNs();
+    int64_t deadline = prev + timeout_ns;
 
     while (true)
     {
@@ -137,7 +164,7 @@ static bool ProcessWaitUntilExited(pid_t pid, long timeout_ns)
             return false;
         }
 
-        const int64_t remaining_ns = deadline - ProcessPollTimeNs();
+        const int64_t remaining_ns = ProcessPollRemainingNs(&deadline, &prev);
         if (remaining_ns <= 0)
         {
             break;
