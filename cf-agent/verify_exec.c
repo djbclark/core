@@ -441,10 +441,6 @@ static ActionResult RepairExec(EvalContext *ctx, const Attributes *a,
         StringSetDestroy(module_tags);
         free(line);
 
-        /* Read before the alarm is disarmed below. It has already fired by now
-         * if it was going to: it is what interrupted the read loop above. */
-        timed_out = (a->contain.timeout != CF_NOINT) && TimeOutHasFired();
-
 #ifdef __MINGW32__
         if (a->transaction.background) // only get return value if we waited for command execution
         {
@@ -454,6 +450,14 @@ static ActionResult RepairExec(EvalContext *ctx, const Attributes *a,
 #endif /* __MINGW32__ */
         {
             int ret = cf_pclose(pfp);
+
+            /* Sample only now, and never earlier. The read loop above ends as
+             * soon as the command closes its output, which it can do long
+             * before it exits -- so the alarm may not fire until cf_pclose()
+             * is already waiting for the child. Reading the flag before that
+             * wait misses exactly the case this is here to catch. It is still
+             * read before the alarm is disarmed further down. */
+            timed_out = (a->contain.timeout != CF_NOINT) && TimeOutHasFired();
 
             if (timed_out)
             {
