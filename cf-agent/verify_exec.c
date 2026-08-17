@@ -469,7 +469,9 @@ static ActionResult RepairExec(EvalContext *ctx, const Attributes *a,
                  * promise is then reported kept or repaired even though the
                  * command never completed. Classify on the timeout instead. */
                 cfPS(ctx, LOG_LEVEL_ERR, PROMISE_RESULT_TIMEOUT, pp, a,
-                     "Command '%s' exceeded exec_timeout of %d seconds and was terminated",
+                     TimeOutSignalledProcess()
+                         ? "Command '%s' exceeded exec_timeout of %d seconds and was terminated"
+                         : "Command '%s' exceeded exec_timeout of %d seconds; it was NOT terminated and ran to completion",
                      pp->promiser, a->contain.timeout);
                 *result = PromiseResultUpdate(*result, PROMISE_RESULT_TIMEOUT);
             }

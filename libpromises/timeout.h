@@ -31,6 +31,11 @@ void SetTimeOut(int timeout);
  * caller report that a command was timed out even when the command's own exit
  * status would otherwise read as success. Cleared by SetTimeOut(). */
 bool TimeOutHasFired(void);
+
+/* True if that alarm also had a process to signal. False means the command
+ * exceeded its timeout but was never terminated, which callers must not
+ * describe as a termination. */
+bool TimeOutSignalledProcess(void);
 void TimeOut(void);
 time_t SetReferenceTime(void);
 
