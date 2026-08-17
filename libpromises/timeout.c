@@ -36,11 +36,18 @@ static bool TIMEOUT_ARMED = false; /* GLOBAL_X */
  * handler, hence volatile sig_atomic_t. */
 static volatile sig_atomic_t TIMEOUT_FIRED = 0; /* GLOBAL_X */
 
+/* Set only when TimeOut() actually had a process to signal. The alarm can fire
+ * with ALARM_PID already cleared -- cf_pclose() clears it before waiting -- in
+ * which case the command timed out but was never terminated, and saying
+ * otherwise would be a false statement in an error message. */
+static volatile sig_atomic_t TIMEOUT_SIGNALLED = 0; /* GLOBAL_X */
+
 void SetTimeOut(int timeout)
 {
     ALARM_PID = -1;
     TIMEOUT_ARMED = true;
     TIMEOUT_FIRED = 0;
+    TIMEOUT_SIGNALLED = 0;
     signal(SIGALRM, (void *) TimeOut);
     alarm(timeout);
 }
@@ -62,6 +69,11 @@ bool TimeOutHasFired(void)
     return TIMEOUT_FIRED != 0;
 }
 
+bool TimeOutSignalledProcess(void)
+{
+    return TIMEOUT_SIGNALLED != 0;
+}
+
 /*************************************************************************/
 
 void TimeOut()
@@ -72,6 +84,7 @@ void TimeOut()
 
     if (ALARM_PID != -1)
     {
+        TIMEOUT_SIGNALLED = 1;
         Log(LOG_LEVEL_VERBOSE, "Time out of process %jd", (intmax_t)ALARM_PID);
 
         /* Read the process group while the process is still alive to be read:

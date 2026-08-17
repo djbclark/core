@@ -37,6 +37,11 @@ bool TimeOutIsArmed(void);
  * status would otherwise read as success. Cleared by SetTimeOut(). */
 bool TimeOutHasFired(void);
 
+/* True if that alarm also had a process to signal. False means the command
+ * exceeded its timeout but was never terminated, which callers must not
+ * describe as a termination. */
+bool TimeOutSignalledProcess(void);
+
 /* Cancel a pending alarm and restore the default handler. Callers used to
  * open-code this; it also has to clear the armed flag, so that a command which
  * completes in time does not leave it set for the next, unrelated, child. */
