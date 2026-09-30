@@ -1,0 +1,41 @@
+body common control
+{
+  inputs => { "../default.sub.cf" };
+}
+
+bundle agent main
+{
+  files:
+    "$(G.testroot)/create-me"
+      create => "true",
+      content => "created";
+    "$(G.testroot)/modify-me"
+      content => "after";
+    "$(G.testroot)/delete-me"
+      delete => tidy;
+    "$(G.testroot)/rename-me"
+      rename => to("renamed");
+    "$(G.testroot)/link"
+      link_from => symlink("$(G.testroot)/modify-me");
+
+  packages:
+    "simulate-json-pkg"
+      policy => "present",
+      package_module => simulate_json;
+}
+
+body rename to(name)
+{
+  newname => "$(name)";
+}
+
+body link_from symlink(target)
+{
+  source => "$(target)";
+  link_type => "symlink";
+}
+
+body package_module simulate_json
+{
+  query_installed_ifelapsed => "0";
+}

@@ -27,10 +27,70 @@
 #include <eval_context.h>       /* SetChangesChroot(), ToChangesChroot() */
 #include <changes_chroot.h>     /* CHROOT_PKGS_OPS_FILE */
 #include <file_lib.h>           /* DeleteDirectoryTree() */
+#include <files_lib.h>          /* MakeParentDirectory() */
+#include <json.h>               /* JsonParseFile() */
+#include <string_sequence.h>    /* WriteLenPrefixedString() */
+#include <writer.h>             /* FileWriter() */
 
 #include <simulate_mode.h>
 
 static char CHROOT_DIR[] = "/tmp/simulate_mode_test_chroot.XXXXXX";
+static char ORIG_DIR[] = "/tmp/simulate_mode_test_orig.XXXXXX";
+static char OUTPUT_FILE[PATH_MAX];
+
+static void reset_records(void)
+{
+    unlink(ToChangesChroot(CHROOT_CHANGES_LIST_FILE));
+    unlink(ToChangesChroot(CHROOT_RENAMES_LIST_FILE));
+    unlink(ToChangesChroot(CHROOT_PKGS_OPS_FILE));
+    unlink(OUTPUT_FILE);
+}
+
+static void write_records(const char *records_file,
+                          const char *const records[], size_t n)
+{
+    FILE *file = fopen(ToChangesChroot(records_file), "w");
+    assert_true(file != NULL);
+    Writer *writer = FileWriter(file);
+    for (size_t i = 0; i < n; i++)
+    {
+        assert_true(WriteLenPrefixedString(writer, records[i]));
+    }
+    WriterClose(writer);
+}
+
+static void create_chroot_file(const char *path, const char *content,
+                               mode_t mode)
+{
+    char chrooted[PATH_MAX];
+    strlcpy(chrooted, ToChangesChroot(path), sizeof(chrooted));
+    assert_true(MakeParentDirectory(path, true, NULL));
+
+    FILE *file = fopen(chrooted, "w");
+    assert_true(file != NULL);
+    assert_true(fputs(content, file) >= 0);
+    fclose(file);
+    assert_int_equal(chmod(chrooted, mode), 0);
+}
+
+static JsonElement *write_and_parse_changes(void)
+{
+    assert_true(WriteChangesJson(OUTPUT_FILE, false));
+
+    JsonElement *json = NULL;
+    assert_int_equal(JsonParseFile(OUTPUT_FILE, 1024 * 1024, &json),
+                     JSON_PARSE_OK);
+    assert_true(json != NULL);
+    return json;
+}
+
+/* Returns the only element of the #key array in #json. */
+static JsonElement *get_single(JsonElement *json, const char *key)
+{
+    JsonElement *array = JsonObjectGetAsArray(json, key);
+    assert_int_equal(JsonLength(array), 1);
+    return JsonArrayGetAsObject(array, 0);
+}
 
 /* #csv contains "op,name,version,architecture" records terminated by "\r\n",
  * just like the records written by RecordPkgOperationInChroot(). */
@@ -101,23 +161,276 @@ static void test_manifest_install_cancels_removal(void)
     unlink(ToChangesChroot(CHROOT_PKGS_OPS_FILE));
 }
 
+static void test_empty_change_set(void)
+{
+    reset_records();
+
+    JsonElement *json = write_and_parse_changes();
+    assert_int_equal(
+        JsonPrimitiveGetAsInteger(JsonObjectGet(json, "format_version")), 1);
+    assert_string_equal(JsonObjectGetAsString(json, "simulate_mode"),
+                        "manifest");
+    assert_int_equal(JsonLength(JsonObjectGetAsArray(json, "files")), 0);
+    assert_int_equal(JsonLength(JsonObjectGetAsArray(json, "renames")), 0);
+    assert_int_equal(JsonLength(JsonObjectGetAsArray(json, "packages")), 0);
+    assert_true(JsonObjectGet(json, "failsafe_fallback") != NULL);
+    assert_false(JsonObjectGetAsBool(json, "failsafe_fallback"));
+    JsonDestroy(json);
+
+    assert_true(WriteChangesJson(OUTPUT_FILE, true));
+    assert_int_equal(JsonParseFile(OUTPUT_FILE, 1024 * 1024, &json),
+                     JSON_PARSE_OK);
+    assert_true(JsonObjectGetAsBool(json, "failsafe_fallback"));
+    JsonDestroy(json);
+}
+
+static void test_created_file(void)
+{
+    reset_records();
+
+    /* Recorded three times, reported once. */
+    const char *const path = "/simulate-test/created \"file\" \\";
+    const char *const paths[] = {path, path, path};
+    create_chroot_file(path, "Hello, CFEngine!\n", 0640);
+    write_records(CHROOT_CHANGES_LIST_FILE, paths, 3);
+
+    struct stat st;
+    assert_int_equal(lstat(ToChangesChroot(path), &st), 0);
+
+    JsonElement *json = write_and_parse_changes();
+    JsonElement *file_info = get_single(json, "files");
+    assert_string_equal(JsonObjectGetAsString(file_info, "path"), path);
+    assert_string_equal(JsonObjectGetAsString(file_info, "change"),
+                        "created");
+    assert_string_equal(JsonObjectGetAsString(file_info, "type"),
+                        "regular file");
+    assert_string_equal(JsonObjectGetAsString(file_info, "permissions"),
+                        "0640");
+    assert_int_equal(
+        JsonPrimitiveGetAsInteger(JsonObjectGet(file_info, "uid")),
+        (long) st.st_uid);
+    assert_int_equal(
+        JsonPrimitiveGetAsInteger(JsonObjectGet(file_info, "gid")),
+        (long) st.st_gid);
+    assert_int_equal(
+        JsonPrimitiveGetAsInteger(JsonObjectGet(file_info, "size")), 17);
+    assert_string_equal(
+        JsonObjectGetAsString(file_info, "sha256"),
+        "9be7023e1f91bae9d1f734b49c579cc2091c71924ae7494c9a5a3a8006527615");
+    JsonDestroy(json);
+}
+
+static void test_deleted_file(void)
+{
+    reset_records();
+
+    const char *const path = "/simulate-test/deleted-file";
+    write_records(CHROOT_CHANGES_LIST_FILE, &path, 1);
+
+    JsonElement *json = write_and_parse_changes();
+    JsonElement *file_info = get_single(json, "files");
+    assert_string_equal(JsonObjectGetAsString(file_info, "path"), path);
+    assert_string_equal(JsonObjectGetAsString(file_info, "change"),
+                        "deleted");
+    assert_true(JsonObjectGet(file_info, "type") == NULL);
+    assert_true(JsonObjectGet(file_info, "sha256") == NULL);
+    JsonDestroy(json);
+}
+
+static void test_modified_file(void)
+{
+    reset_records();
+
+    char path[PATH_MAX];
+    xsnprintf(path, sizeof(path), "%s/modified-file", ORIG_DIR);
+    FILE *file = fopen(path, "w");
+    assert_true(file != NULL);
+    assert_true(fputs("contents before the run\n", file) >= 0);
+    fclose(file);
+
+    create_chroot_file(path, "new contents after the run\n", 0644);
+    const char *const paths[] = {path};
+    write_records(CHROOT_CHANGES_LIST_FILE, paths, 1);
+
+    /* The digest is of the contents after the run. */
+    JsonElement *json = write_and_parse_changes();
+    JsonElement *file_info = get_single(json, "files");
+    assert_string_equal(JsonObjectGetAsString(file_info, "change"),
+                        "modified");
+    assert_string_equal(
+        JsonObjectGetAsString(file_info, "sha256"),
+        "6ba024f3c03f13f9a8c1bb444829640c68553009facb418bb4552dd7ddebe427");
+    JsonDestroy(json);
+}
+
+#ifndef __MINGW32__
+static void test_created_symlink(void)
+{
+    reset_records();
+
+    const char *const target = "/simulate-test/link-target";
+    const char *const path = "/simulate-test/created-link";
+    create_chroot_file(target, "", 0644);
+
+    /* Links in the chroot point to chrooted paths. */
+    char chrooted_target[PATH_MAX];
+    strlcpy(chrooted_target, ToChangesChroot(target),
+            sizeof(chrooted_target));
+    assert_int_equal(symlink(chrooted_target, ToChangesChroot(path)), 0);
+    write_records(CHROOT_CHANGES_LIST_FILE, &path, 1);
+
+    JsonElement *json = write_and_parse_changes();
+    JsonElement *file_info = get_single(json, "files");
+    assert_string_equal(JsonObjectGetAsString(file_info, "type"),
+                        "symbolic link");
+    assert_string_equal(JsonObjectGetAsString(file_info, "target"), target);
+    assert_true(JsonObjectGet(file_info, "permissions") == NULL);
+    JsonDestroy(json);
+}
+#endif  /* !__MINGW32__ */
+
+static void test_renamed_file(void)
+{
+    reset_records();
+
+    const char *const names[] = {"/simulate-test/old", "/simulate-test/new"};
+    write_records(CHROOT_RENAMES_LIST_FILE, names, 2);
+
+    JsonElement *json = write_and_parse_changes();
+    JsonElement *rename = get_single(json, "renames");
+    assert_string_equal(JsonObjectGetAsString(rename, "old_name"), names[0]);
+    assert_string_equal(JsonObjectGetAsString(rename, "new_name"), names[1]);
+    JsonDestroy(json);
+}
+
+static void check_pkg_operations(const char *csv, const char *operation,
+                                 const char *name, const char *version,
+                                 const char *arch)
+{
+    reset_records();
+    write_pkgs_ops(csv);
+
+    JsonElement *json = write_and_parse_changes();
+    JsonElement *packages = JsonObjectGetAsArray(json, "packages");
+    if (operation == NULL)
+    {
+        assert_int_equal(JsonLength(packages), 0);
+        JsonDestroy(json);
+        return;
+    }
+
+    JsonElement *op_info = get_single(json, "packages");
+    assert_string_equal(JsonObjectGetAsString(op_info, "operation"),
+                        operation);
+    assert_string_equal(JsonObjectGetAsString(op_info, "name"), name);
+    if (version == NULL)
+    {
+        assert_true(JsonObjectGet(op_info, "version") == NULL);
+    }
+    else
+    {
+        assert_string_equal(JsonObjectGetAsString(op_info, "version"),
+                            version);
+    }
+    if (arch == NULL)
+    {
+        assert_true(JsonObjectGet(op_info, "architecture") == NULL);
+    }
+    else
+    {
+        assert_string_equal(JsonObjectGetAsString(op_info, "architecture"),
+                            arch);
+    }
+    JsonDestroy(json);
+}
+
+static void test_pkg_operations(void)
+{
+    check_pkg_operations("i,pkg,1.0,x86_64\r\n",
+                         "install", "pkg", "1.0", "x86_64");
+    check_pkg_operations("r,pkg,,\r\n", "remove", "pkg", NULL, NULL);
+
+    /* Net operations only. */
+    check_pkg_operations("r,pkg,,\r\np,pkg,,\r\n", NULL, NULL, NULL, NULL);
+    check_pkg_operations("i,pkg,2.0,\r\na,pkg,2.0,\r\n",
+                         NULL, NULL, NULL, NULL);
+    check_pkg_operations("r,pkg,,\r\ni,pkg,1.0,\r\n",
+                         "install", "pkg", "1.0", NULL);
+}
+
+static void test_write_failure(void)
+{
+    reset_records();
+
+    char bad_output[PATH_MAX];
+    xsnprintf(bad_output, sizeof(bad_output), "%s/no-such-dir/out.json",
+              ORIG_DIR);
+    assert_false(WriteChangesJson(bad_output, false));
+}
+
+#ifndef __MINGW32__
+static void test_output_symlink_not_followed(void)
+{
+    reset_records();
+
+    char link_target[PATH_MAX];
+    xsnprintf(link_target, sizeof(link_target), "%s/link-target", ORIG_DIR);
+    FILE *file = fopen(link_target, "w");
+    assert_true(file != NULL);
+    assert_true(fputs("do not overwrite\n", file) >= 0);
+    fclose(file);
+    assert_int_equal(symlink(link_target, OUTPUT_FILE), 0);
+
+    JsonDestroy(write_and_parse_changes());
+
+    struct stat st;
+    assert_int_equal(lstat(OUTPUT_FILE, &st), 0);
+    assert_true(S_ISREG(st.st_mode));
+
+    char buf[64] = {0};
+    file = fopen(link_target, "r");
+    assert_true(file != NULL);
+    assert_true(fread(buf, 1, sizeof(buf) - 1, file) > 0);
+    fclose(file);
+    assert_string_equal(buf, "do not overwrite\n");
+}
+#endif  /* !__MINGW32__ */
+
 int main()
 {
     PRINT_TEST_BANNER();
 
     assert_true(mkdtemp(CHROOT_DIR) != NULL);
     SetChangesChroot(CHROOT_DIR);
+    assert_true(mkdtemp(ORIG_DIR) != NULL);
+    xsnprintf(OUTPUT_FILE, sizeof(OUTPUT_FILE), "%s/out.json", ORIG_DIR);
+    EVAL_MODE = EVAL_MODE_SIMULATE_MANIFEST;
 
     const UnitTest tests[] =
     {
         unit_test(test_diff_install_cancels_removal),
         unit_test(test_manifest_install_cancels_removal),
+        unit_test(test_empty_change_set),
+        unit_test(test_created_file),
+        unit_test(test_deleted_file),
+        unit_test(test_modified_file),
+#ifndef __MINGW32__
+        unit_test(test_created_symlink),
+#endif
+        unit_test(test_renamed_file),
+        unit_test(test_pkg_operations),
+        unit_test(test_write_failure),
+#ifndef __MINGW32__
+        unit_test(test_output_symlink_not_followed),
+#endif
     };
 
     int ret = run_tests(tests);
 
     DeleteDirectoryTree(CHROOT_DIR);
     rmdir(CHROOT_DIR);
+    DeleteDirectoryTree(ORIG_DIR);
+    rmdir(ORIG_DIR);
 
     return ret;
 }
