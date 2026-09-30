@@ -655,15 +655,19 @@ bool DiffChangedFiles(StringSet **audited_files)
 
 
 typedef struct PkgOperationRecord_ {
-    char *msg;
+    char *pkg_name;
+    char *pkg_arch;
     char *pkg_ver;
 } PkgOperationRecord;
 
-static PkgOperationRecord *PkgOperationRecordNew(char *msg, char *pkg_ver)
+static PkgOperationRecord *PkgOperationRecordNew(const char *pkg_name,
+                                                 const char *pkg_arch,
+                                                 const char *pkg_ver)
 {
     PkgOperationRecord *ret = xmalloc(sizeof(PkgOperationRecord));
-    ret->msg = msg;
-    ret->pkg_ver = pkg_ver;
+    ret->pkg_name = xstrdup(pkg_name);
+    ret->pkg_arch = SafeStringDuplicate(pkg_arch);
+    ret->pkg_ver = SafeStringDuplicate(pkg_ver);
 
     return ret;
 }
@@ -672,7 +676,8 @@ static void PkgOperationRecordDestroy(PkgOperationRecord *pkg_op)
 {
     if (pkg_op != NULL)
     {
-        free(pkg_op->msg);
+        free(pkg_op->pkg_name);
+        free(pkg_op->pkg_arch);
         free(pkg_op->pkg_ver);
         free(pkg_op);
     }
@@ -736,12 +741,34 @@ static inline char *GetPkgOperationMsg(ChrootPkgOperationCode op, const char *pk
     return msg;
 }
 
-bool DiffPkgOperations()
+static void PrintPkgOperations(Map *pkg_ops, ChrootPkgOperationCode op)
 {
+    MapIterator i = MapIteratorInit(pkg_ops);
+    MapKeyValue *item;
+    while ((item = MapIteratorNext(&i)))
+    {
+        const PkgOperationRecord *record = item->value;
+        char *msg = GetPkgOperationMsg(op, record->pkg_name,
+                                       record->pkg_arch, record->pkg_ver);
+        puts(msg);
+        free(msg);
+    }
+}
+
+/* Reduces the recorded package operations to the net sets of packages that
+ * would be installed and removed (maps of PkgOperationRecord), or sets both
+ * to NULL if no package operations were recorded. */
+static bool CollectPkgOperations(Map **installed_out, Map **removed_out)
+{
+    assert(installed_out != NULL);
+    assert(removed_out != NULL);
+
+    *installed_out = NULL;
+    *removed_out = NULL;
+
     const char *pkgs_ops_csv_file = ToChangesChroot(CHROOT_PKGS_OPS_FILE);
     if (access(pkgs_ops_csv_file, F_OK) != 0)
     {
-        Log(LOG_LEVEL_INFO, "No package operations done by the agent run");
         return true;
     }
 
@@ -838,9 +865,8 @@ bool DiffPkgOperations()
             PkgOperationRecord *prev_record = MapGet(installed, name_arch);
             if ((prev_record == NULL) || PkgVersionIsGreater(pkg_ver, prev_record->pkg_ver))
             {
-                char *msg = GetPkgOperationMsg(CHROOT_PKG_OPERATION_CODE_INSTALL,
-                                               pkg_name, pkg_arch, pkg_ver);
-                PkgOperationRecord *record = PkgOperationRecordNew(msg, SafeStringDuplicate(pkg_ver));
+                PkgOperationRecord *record =
+                    PkgOperationRecordNew(pkg_name, pkg_arch, pkg_ver);
                 MapInsert(installed, name_arch, record);
                 name_arch = NULL; /* name_arch is now owned by the map (as a key) */
             }
@@ -874,7 +900,7 @@ bool DiffPkgOperations()
                 {
                     MapRemove(installed, name_arch);
                 }
-                else
+                else if (inst_record != NULL)
                 {
                     /* Keeping the install message, the removal would make no change. */
                     insert_new_msg = false;
@@ -883,9 +909,8 @@ bool DiffPkgOperations()
 
             if (insert_new_msg)
             {
-                char *msg = GetPkgOperationMsg(CHROOT_PKG_OPERATION_CODE_REMOVE,
-                                               pkg_name, pkg_arch, pkg_ver);
-                PkgOperationRecord *record = PkgOperationRecordNew(msg, SafeStringDuplicate(pkg_ver));
+                PkgOperationRecord *record =
+                    PkgOperationRecordNew(pkg_name, pkg_arch, pkg_ver);
                 MapInsert(removed, name_arch, record);
                 name_arch = NULL; /* name_arch is now owned by the map (as a key) */
             }
@@ -894,6 +919,27 @@ bool DiffPkgOperations()
         free(name_arch);
     }
     fclose(csv_file);
+
+    *installed_out = installed;
+    *removed_out = removed;
+
+    return true;
+}
+
+bool DiffPkgOperations()
+{
+    Map *installed;
+    Map *removed;
+    if (!CollectPkgOperations(&installed, &removed))
+    {
+        return false;
+    }
+
+    if (installed == NULL)
+    {
+        Log(LOG_LEVEL_INFO, "No package operations done by the agent run");
+        return true;
+    }
 
     if ((MapSize(installed) == 0) && (MapSize(removed) == 0))
     {
@@ -906,21 +952,8 @@ bool DiffPkgOperations()
     }
 
     Log(LOG_LEVEL_INFO, "Showing differences in installed packages");
-    MapIterator i = MapIteratorInit(installed);
-    MapKeyValue *item;
-    while ((item = MapIteratorNext(&i)))
-    {
-        PkgOperationRecord *value = item->value;
-        const char *msg = value->msg;
-        puts(msg);
-    }
-    i = MapIteratorInit(removed);
-    while ((item = MapIteratorNext(&i)))
-    {
-        PkgOperationRecord *value = item->value;
-        const char *msg = value->msg;
-        puts(msg);
-    }
+    PrintPkgOperations(installed, CHROOT_PKG_OPERATION_CODE_INSTALL);
+    PrintPkgOperations(removed, CHROOT_PKG_OPERATION_CODE_REMOVE);
 
     MapDestroy(installed);
     MapDestroy(removed);
@@ -991,9 +1024,8 @@ bool ManifestPkgOperations()
                 (!NULL_OR_EMPTY(pkg_ver) && !NULL_OR_EMPTY(prev_record->pkg_ver) &&
                  PkgVersionIsGreater(pkg_ver, prev_record->pkg_ver)))
             {
-                char *msg = GetPkgOperationMsg(CHROOT_PKG_OPERATION_CODE_PRESENT,
-                                               pkg_name, pkg_arch, pkg_ver);
-                PkgOperationRecord *record = PkgOperationRecordNew(msg, SafeStringDuplicate(pkg_ver));
+                PkgOperationRecord *record =
+                    PkgOperationRecordNew(pkg_name, pkg_arch, pkg_ver);
                 MapInsert(present, name_arch, record);
                 name_arch = NULL; /* name_arch is now owned by the map (as a key) */
             }
@@ -1020,9 +1052,8 @@ bool ManifestPkgOperations()
                 if ((prev_record == NULL) ||
                     (!NULL_OR_EMPTY(prev_record->pkg_ver) && NULL_OR_EMPTY(pkg_ver)))
                 {
-                    char *msg = GetPkgOperationMsg(CHROOT_PKG_OPERATION_CODE_ABSENT,
-                                                   pkg_name, pkg_arch, pkg_ver);
-                    PkgOperationRecord *record = PkgOperationRecordNew(msg, SafeStringDuplicate(pkg_ver));
+                    PkgOperationRecord *record =
+                        PkgOperationRecordNew(pkg_name, pkg_arch, pkg_ver);
                     MapInsert(absent, name_arch, record);
                     name_arch = NULL; /* name_arch is now owned by the map (as a key) */
                 }
@@ -1039,21 +1070,8 @@ bool ManifestPkgOperations()
     assert((MapSize(present) != 0) || (MapSize(absent) != 0));
 
     Log(LOG_LEVEL_INFO, "Manifesting present and absent packages");
-    MapIterator i = MapIteratorInit(present);
-    MapKeyValue *item;
-    while ((item = MapIteratorNext(&i)))
-    {
-        PkgOperationRecord *value = item->value;
-        const char *msg = value->msg;
-        puts(msg);
-    }
-    i = MapIteratorInit(absent);
-    while ((item = MapIteratorNext(&i)))
-    {
-        PkgOperationRecord *value = item->value;
-        const char *msg = value->msg;
-        puts(msg);
-    }
+    PrintPkgOperations(present, CHROOT_PKG_OPERATION_CODE_PRESENT);
+    PrintPkgOperations(absent, CHROOT_PKG_OPERATION_CODE_ABSENT);
 
     MapDestroy(present);
     MapDestroy(absent);
@@ -1239,11 +1257,73 @@ static bool AddRenamedFilesToJson(JsonElement *renames)
     return success;
 }
 
+static void JsonArrayAppendPkgOperations(JsonElement *packages, Map *pkg_ops,
+                                         const char *operation)
+{
+    assert(packages != NULL);
+    assert(pkg_ops != NULL);
+
+    MapIterator i = MapIteratorInit(pkg_ops);
+    MapKeyValue *item;
+    while ((item = MapIteratorNext(&i)))
+    {
+        const PkgOperationRecord *record = item->value;
+        JsonElement *op_info = JsonObjectCreate(4);
+        JsonObjectAppendString(op_info, "operation", operation);
+        JsonObjectAppendString(op_info, "name", record->pkg_name);
+        if (!NULL_OR_EMPTY(record->pkg_ver))
+        {
+            JsonObjectAppendString(op_info, "version", record->pkg_ver);
+        }
+        if (!NULL_OR_EMPTY(record->pkg_arch))
+        {
+            JsonObjectAppendString(op_info, "architecture", record->pkg_arch);
+        }
+        JsonArrayAppendObject(packages, op_info);
+    }
+}
+
+static int ComparePkgOperations(const JsonElement *a, const JsonElement *b,
+                                ARG_UNUSED void *user_data)
+{
+    int ret = StringSafeCompare(JsonObjectGetAsString(a, "name"),
+                                JsonObjectGetAsString(b, "name"));
+    if (ret == 0)
+    {
+        ret = StringSafeCompare(JsonObjectGetAsString(a, "architecture"),
+                                JsonObjectGetAsString(b, "architecture"));
+    }
+    return ret;
+}
+
+static bool AddPkgOperationsToJson(JsonElement *packages)
+{
+    assert(packages != NULL);
+
+    Map *installed;
+    Map *removed;
+    if (!CollectPkgOperations(&installed, &removed))
+    {
+        return false;
+    }
+    if (installed != NULL)
+    {
+        JsonArrayAppendPkgOperations(packages, installed, "install");
+        JsonArrayAppendPkgOperations(packages, removed, "remove");
+        MapDestroy(installed);
+        MapDestroy(removed);
+
+        /* The maps have no stable order. */
+        JsonSort(packages, ComparePkgOperations, NULL);
+    }
+    return true;
+}
+
 bool WriteChangesJson(const char *output_file, bool failsafe_fallback)
 {
     assert(output_file != NULL);
 
-    JsonElement *json = JsonObjectCreate(4);
+    JsonElement *json = JsonObjectCreate(5);
     JsonObjectAppendInteger(json, "format_version",
                             CHANGES_JSON_FORMAT_VERSION);
     JsonObjectAppendBool(json, "failsafe_fallback", failsafe_fallback);
@@ -1251,7 +1331,10 @@ bool WriteChangesJson(const char *output_file, bool failsafe_fallback)
     JsonObjectAppendArray(json, "files", files);
     JsonElement *renames = JsonArrayCreate(16);
     JsonObjectAppendArray(json, "renames", renames);
-    if (!AddChangedFilesToJson(files) || !AddRenamedFilesToJson(renames))
+    JsonElement *packages = JsonArrayCreate(16);
+    JsonObjectAppendArray(json, "packages", packages);
+    if (!AddChangedFilesToJson(files) || !AddRenamedFilesToJson(renames) ||
+        !AddPkgOperationsToJson(packages))
     {
         JsonDestroy(json);
         return false;
