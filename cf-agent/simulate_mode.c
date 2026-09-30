@@ -41,13 +41,22 @@
 #include <map.h>                /* StringMap */
 #include <csv_parser.h>         /* GetCsvLineNext() */
 #include <unix.h>               /* GetGroupName(), GetUserName() */
+#include <json.h>               /* JsonElement */
+#include <writer.h>             /* StringWriter() */
+#include <hash.h>               /* HashFile(), HashPrintSafe() */
+#include <definitions.h>        /* CF_PERMS_DEFAULT */
+#include <openssl/rand.h>       /* RAND_bytes() */
 
 #include <simulate_mode.h>
 
 #define DELIM_CHAR '='
 
 /* Taken from coreutils/lib/stat-macros.h. */
+#ifndef __MINGW32__
 #define CHMOD_MODE_BITS (S_ISUID | S_ISGID | S_ISVTX | S_IRWXU | S_IRWXG | S_IRWXO)
+#else
+#define CHMOD_MODE_BITS (S_IRWXU | S_IRWXG | S_IRWXO)
+#endif
 
 static inline void PrintDelimiter()
 {
@@ -1050,4 +1059,271 @@ bool ManifestPkgOperations()
     MapDestroy(absent);
 
     return true;
+}
+
+
+#define CHANGES_JSON_FORMAT_VERSION 1
+
+/* Returns NULL for a path that exists neither in the changes chroot nor
+ * outside of it, e.g. a file created and deleted by the same run. */
+static JsonElement *ChangedFileAsJson(const char *path)
+{
+    assert(path != NULL);
+
+    const char *chrooted_path = ToChangesChroot(path);
+    struct stat st_orig;
+    struct stat st;
+    const bool existed = (lstat(path, &st_orig) == 0);
+    if (lstat(chrooted_path, &st) == -1)
+    {
+        if (!existed)
+        {
+            return NULL;
+        }
+        JsonElement *file_info = JsonObjectCreate(2);
+        JsonObjectAppendString(file_info, "path", path);
+        JsonObjectAppendString(file_info, "change", "deleted");
+        return file_info;
+    }
+
+    JsonElement *file_info = JsonObjectCreate(8);
+    JsonObjectAppendString(file_info, "path", path);
+    JsonObjectAppendString(file_info, "change",
+                           existed ? "modified" : "created");
+    JsonObjectAppendString(file_info, "type",
+                           GetFileTypeDescription(st.st_mode));
+
+    /* The permissions of a symbolic link are meaningless and differ between
+     * platforms. */
+    if (!S_ISLNK(st.st_mode))
+    {
+        char perms[5];
+        xsnprintf(perms, sizeof(perms), "%04o",
+                  st.st_mode & CHMOD_MODE_BITS);
+        JsonObjectAppendString(file_info, "permissions", perms);
+    }
+
+    /* 64-bit, so that e.g. uid 4294967294 is not written as -2. */
+    JsonObjectAppendInteger64(file_info, "uid", (int64_t) st.st_uid);
+    JsonObjectAppendInteger64(file_info, "gid", (int64_t) st.st_gid);
+
+    if (S_ISREG(st.st_mode))
+    {
+        JsonObjectAppendInteger64(file_info, "size", (int64_t) st.st_size);
+
+        /* HashFile() cannot report failure, it leaves the digest zeroed. */
+        static const unsigned char no_digest[EVP_MAX_MD_SIZE + 1] = {0};
+        unsigned char digest[EVP_MAX_MD_SIZE + 1];
+        HashFile(chrooted_path, digest, HASH_METHOD_SHA256, false);
+        if (memcmp(digest, no_digest, sizeof(digest)) != 0)
+        {
+            char digest_str[CF_HOSTKEY_STRING_SIZE];
+            HashPrintSafe(digest_str, sizeof(digest_str), digest,
+                          HASH_METHOD_SHA256, false);
+            JsonObjectAppendString(file_info, "sha256", digest_str);
+        }
+        else
+        {
+            Log(LOG_LEVEL_ERR,
+                "Failed to compute the SHA-256 digest of '%s'",
+                chrooted_path);
+        }
+    }
+#ifndef __MINGW32__
+    else if (S_ISLNK(st.st_mode))
+    {
+        char target[PATH_MAX] = {0};
+        if (readlink(chrooted_path, target, sizeof(target) - 1) > 0)
+        {
+            const char *real_target = target;
+            if (IsAbsoluteFileName(target))
+            {
+                real_target = ToNormalRoot(target);
+            }
+            JsonObjectAppendString(file_info, "target", real_target);
+        }
+    }
+#endif  /* !__MINGW32__ */
+
+    return file_info;
+}
+
+/* Appends the length-prefixed strings in #list_file (in the changes chroot)
+ * to #records. A missing #list_file means no records. */
+static bool ReadChrootRecords(const char *list_file, Seq *records)
+{
+    assert(list_file != NULL);
+    assert(records != NULL);
+
+    const char *path = ToChangesChroot(list_file);
+    if (access(path, F_OK) != 0)
+    {
+        return true;
+    }
+
+    int fd = safe_open(path, O_RDONLY);
+    if (fd == -1)
+    {
+        Log(LOG_LEVEL_ERR, "Failed to open '%s': %s", path, GetErrorStr());
+        return false;
+    }
+
+    char *record;
+    int ret;
+    while ((ret = ReadLenPrefixedString(fd, &record)) > 0)
+    {
+        SeqAppend(records, record);
+    }
+    close(fd);
+
+    if (ret < 0)
+    {
+        Log(LOG_LEVEL_ERR, "Failed to read '%s'", path);
+        return false;
+    }
+    return true;
+}
+
+static bool AddChangedFilesToJson(JsonElement *files)
+{
+    assert(files != NULL);
+
+    Seq *paths = SeqNew(16, free);
+    const bool success = ReadChrootRecords(CHROOT_CHANGES_LIST_FILE, paths);
+    if (success)
+    {
+        /* Each file should only be reported once. */
+        StringSet *reported = StringSetNew();
+        const size_t n_paths = SeqLength(paths);
+        for (size_t i = 0; i < n_paths; i++)
+        {
+            const char *path = SeqAt(paths, i);
+            if (!StringSetContains(reported, path))
+            {
+                JsonElement *file_info = ChangedFileAsJson(path);
+                if (file_info != NULL)
+                {
+                    JsonArrayAppendObject(files, file_info);
+                }
+                StringSetAdd(reported, xstrdup(path));
+            }
+        }
+        StringSetDestroy(reported);
+    }
+    SeqDestroy(paths);
+    return success;
+}
+
+static bool AddRenamedFilesToJson(JsonElement *renames)
+{
+    assert(renames != NULL);
+
+    Seq *names = SeqNew(16, free);
+    bool success = ReadChrootRecords(CHROOT_RENAMES_LIST_FILE, names);
+    const size_t n_names = SeqLength(names);
+    if (success && ((n_names % 2) != 0))
+    {
+        /* Pairs of the original and the new name, see
+         * RecordFileRenamedInChroot(). */
+        Log(LOG_LEVEL_ERR, "Invalid data about renamed files");
+        success = false;
+    }
+    for (size_t i = 0; success && (i < n_names); i += 2)
+    {
+        JsonElement *rename = JsonObjectCreate(2);
+        JsonObjectAppendString(rename, "old_name", SeqAt(names, i));
+        JsonObjectAppendString(rename, "new_name", SeqAt(names, i + 1));
+        JsonArrayAppendObject(renames, rename);
+    }
+    SeqDestroy(names);
+    return success;
+}
+
+bool WriteChangesJson(const char *output_file, bool failsafe_fallback)
+{
+    assert(output_file != NULL);
+
+    JsonElement *json = JsonObjectCreate(4);
+    JsonObjectAppendInteger(json, "format_version",
+                            CHANGES_JSON_FORMAT_VERSION);
+    JsonObjectAppendBool(json, "failsafe_fallback", failsafe_fallback);
+    JsonElement *files = JsonArrayCreate(16);
+    JsonObjectAppendArray(json, "files", files);
+    JsonElement *renames = JsonArrayCreate(16);
+    JsonObjectAppendArray(json, "renames", renames);
+    if (!AddChangedFilesToJson(files) || !AddRenamedFilesToJson(renames))
+    {
+        JsonDestroy(json);
+        return false;
+    }
+
+    Log(LOG_LEVEL_INFO, "Writing the simulated change set to '%s'",
+        output_file);
+
+    Writer *writer = StringWriter();
+    JsonWrite(writer, json, 0);
+    WriterWrite(writer, "\n");
+    JsonDestroy(json);
+    char *document = StringWriterClose(writer);
+
+    /* Written to a new file which is then renamed into place, so that a
+     * failed write leaves an existing #output_file intact and a symbolic
+     * link at #output_file is replaced rather than followed. */
+    unsigned char random_bytes[8];
+    if (RAND_bytes(random_bytes, sizeof(random_bytes)) != 1)
+    {
+        Log(LOG_LEVEL_ERR, "Failed to generate a temporary name for '%s'",
+            output_file);
+        free(document);
+        return false;
+    }
+    char random_hex[2 * sizeof(random_bytes) + 1];
+    StringBytesToHex(random_hex, sizeof(random_hex),
+                     random_bytes, sizeof(random_bytes));
+    char *tmp_file;
+    xasprintf(&tmp_file, "%s.%s" CF_NEW, output_file, random_hex);
+
+    bool success = false;
+    int fd = safe_open_create_perms(tmp_file, O_WRONLY | O_CREAT | O_EXCL,
+                                    CF_PERMS_DEFAULT);
+    if (fd == -1)
+    {
+        Log(LOG_LEVEL_ERR,
+            "Failed to create '%s' for the simulated change set: %s",
+            tmp_file, GetErrorStr());
+    }
+    else
+    {
+        const size_t document_len = strlen(document);
+        if (FullWrite(fd, document, document_len) != (ssize_t) document_len)
+        {
+            Log(LOG_LEVEL_ERR,
+                "Failed to write the simulated change set to '%s': %s",
+                tmp_file, GetErrorStr());
+            close(fd);
+        }
+        else if (close(fd) == -1)
+        {
+            Log(LOG_LEVEL_ERR,
+                "Failed to close the simulated change set '%s': %s",
+                tmp_file, GetErrorStr());
+        }
+        else if (rename(tmp_file, output_file) == -1)
+        {
+            Log(LOG_LEVEL_ERR, "Failed to rename '%s' to '%s': %s",
+                tmp_file, output_file, GetErrorStr());
+        }
+        else
+        {
+            success = true;
+        }
+
+        if (!success)
+        {
+            unlink(tmp_file);
+        }
+    }
+    free(tmp_file);
+    free(document);
+    return success;
 }
