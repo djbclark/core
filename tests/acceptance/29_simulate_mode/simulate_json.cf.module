@@ -1,0 +1,20 @@
+#!/bin/sh
+# A package module that knows one package type, so that the simulated run
+# records a package operation. Nothing is installed.
+
+case "$1" in
+    supports-api-version)
+        echo 1
+        ;;
+    get-package-data)
+        echo PackageType=repo
+        # The "File=<promiser>" line, whatever else precedes it.
+        sed -n 's/^File=/Name=/p'
+        ;;
+    *)
+        # Drain input.
+        cat > /dev/null
+        ;;
+esac
+
+exit 0

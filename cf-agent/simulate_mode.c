@@ -1274,6 +1274,71 @@ static bool AddRenamedFilesToJson(JsonElement *renames)
     return success;
 }
 
+static void JsonArrayAppendPkgOperations(JsonElement *packages, Map *pkg_ops,
+                                         const char *operation)
+{
+    assert(packages != NULL);
+    assert(pkg_ops != NULL);
+
+    MapIterator i = MapIteratorInit(pkg_ops);
+    MapKeyValue *item;
+    while ((item = MapIteratorNext(&i)))
+    {
+        const PkgOperationRecord *record = item->value;
+        JsonElement *op_info = JsonObjectCreate(4);
+        JsonObjectAppendString(op_info, "operation", operation);
+        JsonObjectAppendString(op_info, "name", record->pkg_name);
+        if (!NULL_OR_EMPTY(record->pkg_ver))
+        {
+            JsonObjectAppendString(op_info, "version", record->pkg_ver);
+        }
+        if (!NULL_OR_EMPTY(record->pkg_arch))
+        {
+            JsonObjectAppendString(op_info, "architecture", record->pkg_arch);
+        }
+        JsonArrayAppendObject(packages, op_info);
+    }
+}
+
+/* Orders the array by package name and architecture. That is a total order
+ * because CollectPkgOperations() keeps each package in at most one of its two
+ * maps: an installation record cancels any removal record and vice versa. */
+static int ComparePkgOperations(const JsonElement *a, const JsonElement *b,
+                                ARG_UNUSED void *user_data)
+{
+    int ret = StringSafeCompare(JsonObjectGetAsString(a, "name"),
+                                JsonObjectGetAsString(b, "name"));
+    if (ret == 0)
+    {
+        ret = StringSafeCompare(JsonObjectGetAsString(a, "architecture"),
+                                JsonObjectGetAsString(b, "architecture"));
+    }
+    return ret;
+}
+
+static bool AddPkgOperationsToJson(JsonElement *packages)
+{
+    assert(packages != NULL);
+
+    Map *installed;
+    Map *removed;
+    if (!CollectPkgOperations(&installed, &removed))
+    {
+        return false;
+    }
+    if (installed != NULL)
+    {
+        JsonArrayAppendPkgOperations(packages, installed, "install");
+        JsonArrayAppendPkgOperations(packages, removed, "remove");
+        MapDestroy(installed);
+        MapDestroy(removed);
+
+        /* The maps have no stable order. */
+        JsonSort(packages, ComparePkgOperations, NULL);
+    }
+    return true;
+}
+
 bool WriteChangesJson(const char *output_file, bool failsafe_fallback,
                       bool aborted)
 {
@@ -1288,7 +1353,10 @@ bool WriteChangesJson(const char *output_file, bool failsafe_fallback,
     JsonObjectAppendArray(json, "files", files);
     JsonElement *renames = JsonArrayCreate(16);
     JsonObjectAppendArray(json, "renames", renames);
-    if (!AddChangedFilesToJson(files) || !AddRenamedFilesToJson(renames))
+    JsonElement *packages = JsonArrayCreate(16);
+    JsonObjectAppendArray(json, "packages", packages);
+    if (!AddChangedFilesToJson(files) || !AddRenamedFilesToJson(renames) ||
+        !AddPkgOperationsToJson(packages))
     {
         JsonDestroy(json);
         return false;

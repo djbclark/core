@@ -81,6 +81,7 @@ static void reset_records(void)
 {
     unlink(ToChangesChroot(CHROOT_CHANGES_LIST_FILE));
     unlink(ToChangesChroot(CHROOT_RENAMES_LIST_FILE));
+    unlink(ToChangesChroot(CHROOT_PKGS_OPS_FILE));
     unlink(OUTPUT_FILE);
 }
 
@@ -280,6 +281,7 @@ static void test_empty_change_set(void)
     assert_int_equal(get_integer(json, "format_version"), 1);
     assert_int_equal(JsonLength(get_key(json, "files")), 0);
     assert_int_equal(JsonLength(get_key(json, "renames")), 0);
+    assert_int_equal(JsonLength(get_key(json, "packages")), 0);
     assert_false(get_bool(json, "failsafe_fallback"));
     assert_false(get_bool(json, "aborted"));
     JsonDestroy(json);
@@ -475,6 +477,117 @@ static void test_truncated_records(void)
     assert_false(WriteChangesJson(OUTPUT_FILE, false, false));
 }
 
+/* Checks that the package operations recorded in #csv reduce to the single
+ * #operation on the package #name, #version and #arch (NULL for omitted),
+ * or to no operation at all if #operation is NULL. */
+static void check_pkg_operations(const char *csv, const char *operation,
+                                 const char *name, const char *version,
+                                 const char *arch)
+{
+    reset_records();
+    write_pkgs_ops(csv);
+
+    JsonElement *json = write_and_parse_changes();
+    if (operation == NULL)
+    {
+        assert_int_equal(JsonLength(get_key(json, "packages")), 0);
+        JsonDestroy(json);
+        return;
+    }
+
+    JsonElement *op_info = get_single(json, "packages");
+    assert_string_equal(get_string(op_info, "operation"), operation);
+    assert_string_equal(get_string(op_info, "name"), name);
+    if (version == NULL)
+    {
+        assert_true(JsonObjectGet(op_info, "version") == NULL);
+    }
+    else
+    {
+        assert_string_equal(get_string(op_info, "version"), version);
+    }
+    if (arch == NULL)
+    {
+        assert_true(JsonObjectGet(op_info, "architecture") == NULL);
+    }
+    else
+    {
+        assert_string_equal(get_string(op_info, "architecture"), arch);
+    }
+    JsonDestroy(json);
+}
+
+static void test_pkg_operations(void)
+{
+    check_pkg_operations("i,pkg,1.0,x86_64\r\n",
+                         "install", "pkg", "1.0", "x86_64");
+    check_pkg_operations("i,pkg,,x86_64\r\n",
+                         "install", "pkg", NULL, "x86_64");
+    check_pkg_operations("r,pkg,,x86_64\r\n",
+                         "remove", "pkg", NULL, "x86_64");
+    check_pkg_operations("r,pkg,,\r\n", "remove", "pkg", NULL, NULL);
+    check_pkg_operations("r,pkg,1.0,\r\n", "remove", "pkg", "1.0", NULL);
+
+    /* Net operations only: cancelled ones are not reported and a newer
+     * version wins. */
+    check_pkg_operations("r,pkg,,\r\np,pkg,,\r\n", NULL, NULL, NULL, NULL);
+    check_pkg_operations("i,pkg,2.0,\r\na,pkg,2.0,\r\n",
+                         NULL, NULL, NULL, NULL);
+    check_pkg_operations("r,pkg,,\r\ni,pkg,1.0,\r\n",
+                         "install", "pkg", "1.0", NULL);
+    check_pkg_operations("i,pkg,1.0,\r\ni,pkg,2.0,\r\n",
+                         "install", "pkg", "2.0", NULL);
+    check_pkg_operations("i,pkg,v2,\r\ni,pkg,latest,\r\n",
+                         "install", "pkg", "latest", NULL);
+
+    /* A removal after an installation removes the package that was present
+     * before the run, unless it names another version than the one that
+     * would be installed. A versioned removal is more specific than an
+     * unversioned one. */
+    check_pkg_operations("i,pkg,1.0,\r\nr,pkg,,\r\n",
+                         "remove", "pkg", NULL, NULL);
+    check_pkg_operations("i,pkg,1.0,\r\nr,pkg,1.0,\r\n",
+                         "remove", "pkg", "1.0", NULL);
+    check_pkg_operations("i,pkg,2.0,\r\na,pkg,1.0,\r\n",
+                         "install", "pkg", "2.0", NULL);
+    check_pkg_operations("r,pkg,1.0,\r\nr,pkg,,\r\n",
+                         "remove", "pkg", "1.0", NULL);
+
+    /* A malformed record is skipped. */
+    check_pkg_operations("garbage\r\ni,pkg,1.0,\r\n",
+                         "install", "pkg", "1.0", NULL);
+
+    /* The record written by RecordPkgOperationInChroot() itself. */
+    reset_records();
+    assert_true(RecordPkgOperationInChroot(CHROOT_PKG_OPERATION_INSTALL,
+                                           "pkg", "1.0", "x86_64"));
+    JsonElement *json = write_and_parse_changes();
+    JsonElement *op_info = get_single(json, "packages");
+    assert_string_equal(get_string(op_info, "operation"), "install");
+    assert_string_equal(get_string(op_info, "version"), "1.0");
+    assert_string_equal(get_string(op_info, "architecture"), "x86_64");
+    JsonDestroy(json);
+}
+
+static void test_pkg_operations_sorted(void)
+{
+    reset_records();
+    write_pkgs_ops("i,zeta,1.0,x86_64\r\n"
+                   "r,alpha,,\r\n"
+                   "i,zeta,1.0,arm64\r\n");
+
+    JsonElement *json = write_and_parse_changes();
+    JsonElement *packages = get_key(json, "packages");
+    assert_int_equal(JsonLength(packages), 3);
+    assert_string_equal(get_string(JsonArrayGet(packages, 0), "name"),
+                        "alpha");
+    assert_string_equal(get_string(JsonArrayGet(packages, 1), "architecture"),
+                        "arm64");
+    assert_string_equal(get_string(JsonArrayGet(packages, 2), "architecture"),
+                        "x86_64");
+    JsonDestroy(json);
+}
+
 static void test_write_failure(void)
 {
     reset_records();
@@ -542,6 +655,8 @@ int main()
 #endif
         unit_test(test_renamed_file),
         unit_test(test_truncated_records),
+        unit_test(test_pkg_operations),
+        unit_test(test_pkg_operations_sorted),
         unit_test(test_write_failure),
 #ifndef __MINGW32__
         unit_test(test_output_symlink_not_followed),
