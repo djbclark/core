@@ -185,6 +185,7 @@ static const struct option OPTIONS[] =
     {"skip-bootstrap-service-start", no_argument, 0, 0 },
     {"skip-db-check", optional_argument, 0, 0 },
     {"simulate", required_argument, 0, 0},
+    {"simulate-json", required_argument, 0, 0},
     {NULL, 0, 0, '\0'}
 };
 
@@ -221,6 +222,7 @@ static const char *const HINTS[] =
     "Do not start CFEngine services as part of the bootstrap process",
     "Do not run database integrity checks and repairs at startup",
     "Run in simulate mode, either 'manifest', 'manifest-full' or 'diff'",
+    "Write the change set of a --simulate run to the given file as JSON",
     NULL
 };
 
@@ -337,6 +339,23 @@ int main(int argc, char *argv[])
     EndAudit(ctx, CFA_BACKGROUND);
 
     Nova_NoteAgentExecutionPerformance(config->input_file, start);
+
+    /* Before GenericAgentFinalize(), which deinitializes the crypto library
+     * needed for the file digests. */
+    if (config->agent_specific.agent.simulate_json_file != NULL)
+    {
+        const Class *failsafe_class =
+            EvalContextClassGet(ctx, NULL, "failsafe_fallback");
+        const bool failsafe_fallback =
+            ((failsafe_class != NULL) && !failsafe_class->is_soft);
+        if (!WriteChangesJson(config->agent_specific.agent.simulate_json_file,
+                              failsafe_fallback, EvalAborted(ctx)) &&
+            (ret == 0))
+        {
+            ret = EXIT_FAILURE;
+        }
+        free(config->agent_specific.agent.simulate_json_file);
+    }
 
     GenericAgentFinalize(ctx, config);
 
@@ -748,6 +767,18 @@ static GenericAgentConfig *CheckOpts(int argc, char **argv)
                     DoCleanupAndExit(EXIT_FAILURE);
                 }
             }
+            else if (StringEqual(option_name, "simulate-json"))
+            {
+                if (!IsAbsoluteFileName(optarg))
+                {
+                    Log(LOG_LEVEL_ERR,
+                        "Invalid argument for --simulate-json, an absolute path is required, not '%s'",
+                        optarg);
+                    DoCleanupAndExit(EXIT_FAILURE);
+                }
+                free(config->agent_specific.agent.simulate_json_file);
+                config->agent_specific.agent.simulate_json_file = xstrdup(optarg);
+            }
             break;
         }
         default:
@@ -772,6 +803,14 @@ static GenericAgentConfig *CheckOpts(int argc, char **argv)
     {
         Log(LOG_LEVEL_ERR,
             "Option --trust-server can only be used when bootstrapping");
+        DoCleanupAndExit(EXIT_FAILURE);
+    }
+
+    if ((config->agent_specific.agent.simulate_json_file != NULL) &&
+        !ChrootChanges())
+    {
+        Log(LOG_LEVEL_ERR,
+            "Option --simulate-json can only be used together with --simulate");
         DoCleanupAndExit(EXIT_FAILURE);
     }
 

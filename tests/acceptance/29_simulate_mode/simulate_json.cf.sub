@@ -1,0 +1,28 @@
+body common control
+{
+  inputs => { "../default.sub.cf" };
+}
+
+bundle agent main
+{
+  files:
+    "$(G.testroot)$(const.dirsep)create-me"
+      create => "true",
+      content => "created";
+
+    "$(G.testroot)$(const.dirsep)modify-me" content => "after";
+    "$(G.testroot)$(const.dirsep)delete-me" delete => tidy;
+    "$(G.testroot)$(const.dirsep)rename-me" rename => to("renamed");
+    "$(G.testroot)$(const.dirsep)link" link_from => symlink("$(G.testroot)$(const.dirsep)modify-me");
+}
+
+body rename to(name)
+{
+  newname => "$(name)";
+}
+
+body link_from symlink(target)
+{
+  source => "$(target)";
+  link_type => "symlink";
+}
