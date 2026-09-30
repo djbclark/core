@@ -1239,6 +1239,194 @@ static bool AddRenamedFilesToJson(JsonElement *renames)
     return success;
 }
 
+/* Returns the length (2 to 4) of the valid multi-byte UTF-8 sequence at the
+ * beginning of the #n bytes at #bytes, or 0 if they do not start with one
+ * (overlong encodings, surrogates and code points above U+10FFFF are
+ * invalid). */
+static size_t ValidUtf8SequenceLength(const unsigned char *bytes, size_t n)
+{
+    assert(bytes != NULL);
+
+    if (n < 2)
+    {
+        return 0;
+    }
+
+    /* The ranges of the lead byte and the first continuation byte, see RFC
+     * 3629. */
+    size_t len;
+    unsigned char cont_min = 0x80;
+    unsigned char cont_max = 0xbf;
+    if ((bytes[0] >= 0xc2) && (bytes[0] <= 0xdf))
+    {
+        len = 2;
+    }
+    else if ((bytes[0] >= 0xe0) && (bytes[0] <= 0xef))
+    {
+        len = 3;
+        if (bytes[0] == 0xe0)
+        {
+            cont_min = 0xa0;    /* overlong otherwise */
+        }
+        else if (bytes[0] == 0xed)
+        {
+            cont_max = 0x9f;    /* surrogate otherwise */
+        }
+    }
+    else if ((bytes[0] >= 0xf0) && (bytes[0] <= 0xf4))
+    {
+        len = 4;
+        if (bytes[0] == 0xf0)
+        {
+            cont_min = 0x90;    /* overlong otherwise */
+        }
+        else if (bytes[0] == 0xf4)
+        {
+            cont_max = 0x8f;    /* above U+10FFFF otherwise */
+        }
+    }
+    else
+    {
+        /* A continuation byte, an overlong lead byte (0xc0, 0xc1) or a byte
+         * that cannot appear in UTF-8 at all. */
+        return 0;
+    }
+
+    if (n < len)
+    {
+        return 0;
+    }
+    if ((bytes[1] < cont_min) || (bytes[1] > cont_max))
+    {
+        return 0;
+    }
+    for (size_t i = 2; i < len; i++)
+    {
+        if ((bytes[i] < 0x80) || (bytes[i] > 0xbf))
+        {
+            return 0;
+        }
+    }
+    return len;
+}
+
+/* If #c points at a "\uXXXX" escape sequence encoding a single byte (XXXX <=
+ * 0x00FF, the only form JsonEncodeStringWriter() produces), stores the byte
+ * in #byte_out and returns true, otherwise returns false. */
+static bool GetJsonEscapedByte(const char *c, unsigned char *byte_out)
+{
+    assert(c != NULL);
+    assert(byte_out != NULL);
+
+    if ((c[0] != '\\') || (c[1] != 'u'))
+    {
+        return false;
+    }
+
+    unsigned int value = 0;
+    for (size_t i = 2; i < 6; i++)
+    {
+        const char h = c[i];
+        value <<= 4;
+        if ((h >= '0') && (h <= '9'))
+        {
+            value |= (h - '0');
+        }
+        else if ((h >= 'a') && (h <= 'f'))
+        {
+            value |= (h - 'a' + 10);
+        }
+        else if ((h >= 'A') && (h <= 'F'))
+        {
+            value |= (h - 'A' + 10);
+        }
+        else
+        {
+            return false;
+        }
+    }
+    if (value > 0xff)
+    {
+        return false;
+    }
+
+    *byte_out = value;
+    return true;
+}
+
+/* JsonWrite() (JsonEncodeStringWriter() in libntech) escapes every byte
+ * outside printable ASCII as an individual "\u00XX" escape sequence. That is
+ * well-formed JSON, but "\u00XX" denotes the code point U+00XX, so a
+ * conformant JSON parser decodes each byte of a multi-byte UTF-8 character
+ * (e.g. in a file name) as a separate, wrong character. Since the change set
+ * is meant for consumption by other programs, rewrite the escapes that
+ * encode a valid UTF-8 sequence back to the raw bytes, which a JSON string
+ * can carry verbatim. Escaped bytes that are not part of a valid UTF-8
+ * sequence are left as "\u00XX" -- there is no way to represent them exactly
+ * in a JSON document, which has to be valid UTF-8 itself. Returns the
+ * rewritten copy of #json_str. */
+static char *RestoreUtf8InJson(const char *json_str)
+{
+    assert(json_str != NULL);
+
+    Writer *writer = StringWriter();
+    const char *c = json_str;
+    while (*c != '\0')
+    {
+        /* Everything JsonWrite() emits is ASCII and every backslash starts
+         * an escape sequence inside a string. Collect up to 4 consecutive
+         * escapes of non-ASCII bytes -- the longest possible UTF-8
+         * sequence. */
+        unsigned char bytes[4];
+        size_t n_bytes = 0;
+        unsigned char byte;
+        while ((n_bytes < 4) &&
+               GetJsonEscapedByte(c + (6 * n_bytes), &byte) &&
+               (byte >= 0x80))
+        {
+            bytes[n_bytes] = byte;
+            n_bytes++;
+        }
+
+        if (n_bytes == 0)
+        {
+            WriterWriteChar(writer, *c);
+            c++;
+            if ((c[-1] == '\\') && (*c != '\0'))
+            {
+                /* Copy the escaped character too so that an escaped
+                 * backslash ("\\") is not mistaken for the start of a new
+                 * escape sequence. */
+                WriterWriteChar(writer, *c);
+                c++;
+            }
+        }
+        else
+        {
+            const size_t seq_len = ValidUtf8SequenceLength(bytes, n_bytes);
+            if (seq_len > 0)
+            {
+                for (size_t i = 0; i < seq_len; i++)
+                {
+                    WriterWriteChar(writer, bytes[i]);
+                }
+                c += 6 * seq_len;
+            }
+            else
+            {
+                /* Not (the start of) a valid UTF-8 sequence, keep the first
+                 * escape and reconsider the rest in the next iteration. */
+                for (size_t i = 0; i < 6; i++)
+                {
+                    WriterWriteChar(writer, c[i]);
+                }
+                c += 6;
+            }
+        }
+    }
+    return StringWriterClose(writer);
+}
+
 bool WriteChangesJson(const char *output_file, bool failsafe_fallback)
 {
     assert(output_file != NULL);
@@ -1264,7 +1452,9 @@ bool WriteChangesJson(const char *output_file, bool failsafe_fallback)
     JsonWrite(writer, json, 0);
     WriterWrite(writer, "\n");
     JsonDestroy(json);
-    char *document = StringWriterClose(writer);
+    char *escaped = StringWriterClose(writer);
+    char *document = RestoreUtf8InJson(escaped);
+    free(escaped);
 
     /* Written to a new file which is then renamed into place, so that a
      * failed write leaves an existing #output_file intact and a symbolic
