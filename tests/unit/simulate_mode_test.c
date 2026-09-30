@@ -108,6 +108,20 @@ static void test_diff_version_and_architecture(void)
     unlink(ToChangesChroot(CHROOT_PKGS_OPS_FILE));
 }
 
+/* A removal with a version and no install record to cancel is a removal to
+ * report. */
+static void test_diff_removal_with_version(void)
+{
+    write_pkgs_ops("r,foo,1.0,\r\n");
+
+    char output[4096];
+    assert_true(call_with_captured_stdout(&DiffPkgOperations, output, sizeof(output)));
+
+    assert_true(strstr(output, "Package 'foo [1.0]' would be removed") != NULL);
+
+    unlink(ToChangesChroot(CHROOT_PKGS_OPS_FILE));
+}
+
 static void test_manifest_install_cancels_removal(void)
 {
     write_pkgs_ops("r,foo,,\r\n"
@@ -384,6 +398,7 @@ int main()
     {
         unit_test(test_diff_install_cancels_removal),
         unit_test(test_diff_version_and_architecture),
+        unit_test(test_diff_removal_with_version),
         unit_test(test_manifest_install_cancels_removal),
         unit_test(test_empty_change_set),
         unit_test(test_created_file),
