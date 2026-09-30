@@ -1,0 +1,46 @@
+{
+  "failsafe_fallback": false,
+  "files": [
+    {
+      "change": "created",
+      "gid": GID,
+      "path": "WORKDIR/tmp/create-me",
+      "permissions": "0600",
+      "sha256": "406effb1e9c59672c66a598c2b21e331b23b16c54024e96d6df3e7c173549791",
+      "size": 7,
+      "type": "regular file",
+      "uid": UID
+    },
+    {
+      "change": "modified",
+      "gid": GID,
+      "path": "WORKDIR/tmp/modify-me",
+      "permissions": "0600",
+      "sha256": "f39592393ef0859cb196a52693d2cea00fb2df784b3c04ae54aa7cadb8e562f8",
+      "size": 5,
+      "type": "regular file",
+      "uid": UID
+    },
+    {
+      "change": "deleted",
+      "path": "WORKDIR/tmp/delete-me"
+    },
+    {
+      "change": "created",
+      "gid": GID,
+      "path": "WORKDIR/tmp/link",
+      "target": "WORKDIR/tmp/modify-me",
+      "type": "symbolic link",
+      "uid": UID
+    }
+  ],
+  "format_version": 1,
+  "renames": [
+    {
+      "new_name": "WORKDIR/tmp/renamed",
+      "old_name": "WORKDIR/tmp/rename-me"
+    }
+  ]
+}
+exit status 1 without --simulate
+exit status 1 with a relative path
