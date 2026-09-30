@@ -669,6 +669,35 @@ static void PkgOperationRecordDestroy(PkgOperationRecord *pkg_op)
     }
 }
 
+typedef struct PkgOperation_ {
+    char *pkg_name;
+    char *pkg_arch;
+    char *pkg_ver;
+} PkgOperation;
+
+static PkgOperation *PkgOperationNew(const char *pkg_name,
+                                     const char *pkg_arch,
+                                     const char *pkg_ver)
+{
+    PkgOperation *ret = xmalloc(sizeof(PkgOperation));
+    ret->pkg_name = SafeStringDuplicate(pkg_name);
+    ret->pkg_arch = SafeStringDuplicate(pkg_arch);
+    ret->pkg_ver = SafeStringDuplicate(pkg_ver);
+
+    return ret;
+}
+
+static void PkgOperationDestroy(PkgOperation *pkg_op)
+{
+    if (pkg_op != NULL)
+    {
+        free(pkg_op->pkg_name);
+        free(pkg_op->pkg_arch);
+        free(pkg_op->pkg_ver);
+        free(pkg_op);
+    }
+}
+
 static inline bool PkgVersionIsGreater(const char *ver1, const char *ver2)
 {
     /* Empty/missing versions should be handled separately based on the
@@ -727,12 +756,20 @@ static inline char *GetPkgOperationMsg(ChrootPkgOperationCode op, const char *pk
     return msg;
 }
 
-bool DiffPkgOperations()
+/* Reduces the recorded package operations to the net sets of packages that
+ * would be installed and removed (maps of PkgOperation), or sets both to NULL
+ * if no package operations were recorded. */
+static bool CollectPkgOperations(Map **installed_out, Map **removed_out)
 {
+    assert(installed_out != NULL);
+    assert(removed_out != NULL);
+
+    *installed_out = NULL;
+    *removed_out = NULL;
+
     const char *pkgs_ops_csv_file = ToChangesChroot(CHROOT_PKGS_OPS_FILE);
     if (access(pkgs_ops_csv_file, F_OK) != 0)
     {
-        Log(LOG_LEVEL_INFO, "No package operations done by the agent run");
         return true;
     }
 
@@ -744,8 +781,8 @@ bool DiffPkgOperations()
         return false;
     }
 
-    Map *installed = MapNew(StringHash_untyped, StringEqual_untyped, free, (MapDestroyDataFn) PkgOperationRecordDestroy);
-    Map *removed = MapNew(StringHash_untyped, StringEqual_untyped, free, (MapDestroyDataFn) PkgOperationRecordDestroy);
+    Map *installed = MapNew(StringHash_untyped, StringEqual_untyped, free, (MapDestroyDataFn) PkgOperationDestroy);
+    Map *removed = MapNew(StringHash_untyped, StringEqual_untyped, free, (MapDestroyDataFn) PkgOperationDestroy);
     char *line;
     while ((line = GetCsvLineNext(csv_file)) != NULL)
     {
@@ -804,7 +841,7 @@ bool DiffPkgOperations()
             }
             else
             {
-                PkgOperationRecord *record = MapGet(installed, name_arch);
+                PkgOperation *record = MapGet(installed, name_arch);
                 if ((record != NULL) && StringEqual(pkg_ver, record->pkg_ver))
                 {
                     /* Matching version being removed -> cancel the installation */
@@ -826,12 +863,11 @@ bool DiffPkgOperations()
             /* Package installation cancels a previous removal (if any). */
             MapRemove(removed, name_arch);
 
-            PkgOperationRecord *prev_record = MapGet(installed, name_arch);
+            PkgOperation *prev_record = MapGet(installed, name_arch);
             if ((prev_record == NULL) || PkgVersionIsGreater(pkg_ver, prev_record->pkg_ver))
             {
-                char *msg = GetPkgOperationMsg(CHROOT_PKG_OPERATION_CODE_INSTALL,
-                                               pkg_name, pkg_arch, pkg_ver);
-                PkgOperationRecord *record = PkgOperationRecordNew(msg, SafeStringDuplicate(pkg_ver));
+                PkgOperation *record = PkgOperationNew(pkg_name, pkg_arch,
+                                                       pkg_ver);
                 MapInsert(installed, name_arch, record);
                 name_arch = NULL; /* name_arch is now owned by the map (as a key) */
             }
@@ -843,7 +879,7 @@ bool DiffPkgOperations()
             /* If there is a previous 'remove' operation record with version specified, prefer that
              * message over a new message without version specification as the net result would be
              * the package being removed, in the version that was pressent. */
-            PkgOperationRecord *prev_record = MapGet(removed, name_arch);
+            PkgOperation *prev_record = MapGet(removed, name_arch);
             bool insert_new_msg = ((prev_record == NULL) || (NULL_OR_EMPTY(prev_record->pkg_ver)));
 
             /* If there is a previous 'install' operation and now there is a 'remove' operation it
@@ -860,7 +896,7 @@ bool DiffPkgOperations()
             }
             else
             {
-                PkgOperationRecord *inst_record = MapGet(installed, name_arch);
+                PkgOperation *inst_record = MapGet(installed, name_arch);
                 if ((inst_record != NULL) && (StringEqual(pkg_ver, inst_record->pkg_ver)))
                 {
                     MapRemove(installed, name_arch);
@@ -874,9 +910,8 @@ bool DiffPkgOperations()
 
             if (insert_new_msg)
             {
-                char *msg = GetPkgOperationMsg(CHROOT_PKG_OPERATION_CODE_REMOVE,
-                                               pkg_name, pkg_arch, pkg_ver);
-                PkgOperationRecord *record = PkgOperationRecordNew(msg, SafeStringDuplicate(pkg_ver));
+                PkgOperation *record = PkgOperationNew(pkg_name, pkg_arch,
+                                                       pkg_ver);
                 MapInsert(removed, name_arch, record);
                 name_arch = NULL; /* name_arch is now owned by the map (as a key) */
             }
@@ -885,6 +920,27 @@ bool DiffPkgOperations()
         free(name_arch);
     }
     fclose(csv_file);
+
+    *installed_out = installed;
+    *removed_out = removed;
+
+    return true;
+}
+
+bool DiffPkgOperations()
+{
+    Map *installed;
+    Map *removed;
+    if (!CollectPkgOperations(&installed, &removed))
+    {
+        return false;
+    }
+
+    if (installed == NULL)
+    {
+        Log(LOG_LEVEL_INFO, "No package operations done by the agent run");
+        return true;
+    }
 
     if ((MapSize(installed) == 0) && (MapSize(removed) == 0))
     {
@@ -901,16 +957,22 @@ bool DiffPkgOperations()
     MapKeyValue *item;
     while ((item = MapIteratorNext(&i)))
     {
-        PkgOperationRecord *value = item->value;
-        const char *msg = value->msg;
+        PkgOperation *value = item->value;
+        char *msg = GetPkgOperationMsg(CHROOT_PKG_OPERATION_CODE_INSTALL,
+                                       value->pkg_name, value->pkg_arch,
+                                       value->pkg_ver);
         puts(msg);
+        free(msg);
     }
     i = MapIteratorInit(removed);
     while ((item = MapIteratorNext(&i)))
     {
-        PkgOperationRecord *value = item->value;
-        const char *msg = value->msg;
+        PkgOperation *value = item->value;
+        char *msg = GetPkgOperationMsg(CHROOT_PKG_OPERATION_CODE_REMOVE,
+                                       value->pkg_name, value->pkg_arch,
+                                       value->pkg_ver);
         puts(msg);
+        free(msg);
     }
 
     MapDestroy(installed);
