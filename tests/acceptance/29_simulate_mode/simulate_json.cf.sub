@@ -14,6 +14,13 @@ bundle agent main
     "$(G.testroot)/delete-me" delete => tidy;
     "$(G.testroot)/rename-me" rename => to("renamed");
     "$(G.testroot)/link" link_from => symlink("$(G.testroot)/modify-me");
+
+  packages:
+    # Logs "Error installing package": the simulated installation is validated
+    # against the installed packages, where it is not. The record is the point.
+    "simulate-json-pkg"
+      policy => "present",
+      package_module => simulate_json;
 }
 
 body rename to(name)
@@ -25,4 +32,9 @@ body link_from symlink(target)
 {
   source => "$(target)";
   link_type => "symlink";
+}
+
+body package_module simulate_json
+{
+  query_installed_ifelapsed => "0";
 }
