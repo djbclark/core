@@ -2638,6 +2638,7 @@ GenericAgentConfig *GenericAgentConfigNewDefault(AgentType agent_type, bool tty_
     case AGENT_TYPE_AGENT:
         config->agent_specific.agent.show_evaluated_classes = NULL;
         config->agent_specific.agent.show_evaluated_variables = NULL;
+        config->agent_specific.agent.simulate_json_file = NULL;
         break;
 
     default:
