@@ -101,6 +101,37 @@ static void test_manifest_install_cancels_removal(void)
     unlink(ToChangesChroot(CHROOT_PKGS_OPS_FILE));
 }
 
+/* The map key made of the package name and architecture must not collide for
+ * different packages. Here the removal of one package must not be cancelled
+ * by the installation of another. */
+static void test_diff_name_arch_key_collision(void)
+{
+    write_pkgs_ops("r,a-_-b,,c\r\n"
+                   "i,a,,b-_-c\r\n");
+
+    char output[4096];
+    assert_true(call_with_captured_stdout(&DiffPkgOperations, output, sizeof(output)));
+
+    assert_true(strstr(output, "Package 'a-_-b-c' would be removed") != NULL);
+    assert_true(strstr(output, "Package 'a-b-_-c' would be installed") != NULL);
+
+    unlink(ToChangesChroot(CHROOT_PKGS_OPS_FILE));
+}
+
+static void test_manifest_name_arch_key_collision(void)
+{
+    write_pkgs_ops("r,a-_-b,,c\r\n"
+                   "i,a,,b-_-c\r\n");
+
+    char output[4096];
+    assert_true(call_with_captured_stdout(&ManifestPkgOperations, output, sizeof(output)));
+
+    assert_true(strstr(output, "Package 'a-_-b-c' would be absent") != NULL);
+    assert_true(strstr(output, "Package 'a-b-_-c' would be present") != NULL);
+
+    unlink(ToChangesChroot(CHROOT_PKGS_OPS_FILE));
+}
+
 int main()
 {
     PRINT_TEST_BANNER();
@@ -112,6 +143,8 @@ int main()
     {
         unit_test(test_diff_install_cancels_removal),
         unit_test(test_manifest_install_cancels_removal),
+        unit_test(test_diff_name_arch_key_collision),
+        unit_test(test_manifest_name_arch_key_collision),
     };
 
     int ret = run_tests(tests);
