@@ -101,6 +101,61 @@ static void test_manifest_install_cancels_removal(void)
     unlink(ToChangesChroot(CHROOT_PKGS_OPS_FILE));
 }
 
+/* A record with an unknown or empty operation code or with an empty package
+ * name is skipped (and logged). It must not be reported as a removal. */
+static void test_diff_invalid_record_skipped(void)
+{
+    write_pkgs_ops("x,bad,,\r\n"
+                   ",bad,,\r\n"
+                   "r,,1.0,\r\n"
+                   "i,foo,1.2.3,\r\n");
+
+    char output[4096];
+    assert_true(call_with_captured_stdout(&DiffPkgOperations, output, sizeof(output)));
+
+    assert_true(strstr(output, "Package 'foo [1.2.3]' would be installed") != NULL);
+    assert_true(strstr(output, "Package 'bad'") == NULL);
+    assert_true(strstr(output, "would be removed") == NULL);
+
+    unlink(ToChangesChroot(CHROOT_PKGS_OPS_FILE));
+}
+
+static void test_manifest_invalid_record_skipped(void)
+{
+    write_pkgs_ops("x,bad,,\r\n"
+                   ",bad,,\r\n"
+                   "r,,1.0,\r\n"
+                   "i,foo,1.2.3,\r\n");
+
+    char output[4096];
+    assert_true(call_with_captured_stdout(&ManifestPkgOperations, output, sizeof(output)));
+
+    assert_true(strstr(output, "Package 'foo [1.2.3]' would be present") != NULL);
+    assert_true(strstr(output, "Package 'bad'") == NULL);
+    assert_true(strstr(output, "would be absent") == NULL);
+
+    unlink(ToChangesChroot(CHROOT_PKGS_OPS_FILE));
+}
+
+/* A file in which no record is valid leaves nothing to report. The manifest
+ * report used to assert that there was something to manifest, so it must
+ * complete without aborting and report no package. */
+static void test_manifest_all_records_invalid(void)
+{
+    write_pkgs_ops("x,bad,,\r\n"
+                   "\r\n");
+
+    char output[4096];
+    assert_true(call_with_captured_stdout(&ManifestPkgOperations, output, sizeof(output)));
+
+    /* The records were read and rejected (Log() goes to stdout here) ... */
+    assert_true(strstr(output, "Invalid package operation record") != NULL);
+    /* ... and nothing was reported. */
+    assert_true(strstr(output, "would be") == NULL);
+
+    unlink(ToChangesChroot(CHROOT_PKGS_OPS_FILE));
+}
+
 int main()
 {
     PRINT_TEST_BANNER();
@@ -112,6 +167,9 @@ int main()
     {
         unit_test(test_diff_install_cancels_removal),
         unit_test(test_manifest_install_cancels_removal),
+        unit_test(test_diff_invalid_record_skipped),
+        unit_test(test_manifest_invalid_record_skipped),
+        unit_test(test_manifest_all_records_invalid),
     };
 
     int ret = run_tests(tests);

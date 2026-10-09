@@ -685,6 +685,20 @@ static inline bool PkgVersionIsGreater(const char *ver1, const char *ver2)
     return (StringSafeCompare(ver1, ver2) == 1);
 }
 
+/* The operation code written by RecordPkgOperationInChroot() is one of the
+ * ChrootPkgOperationCode characters. */
+static inline bool PkgOperationCodeIsValid(const char *op)
+{
+    if ((op[0] == '\0') || (op[1] != '\0'))
+    {
+        return false;
+    }
+    return ((op[0] == CHROOT_PKG_OPERATION_CODE_INSTALL) ||
+            (op[0] == CHROOT_PKG_OPERATION_CODE_REMOVE) ||
+            (op[0] == CHROOT_PKG_OPERATION_CODE_PRESENT) ||
+            (op[0] == CHROOT_PKG_OPERATION_CODE_ABSENT));
+}
+
 static inline char *GetPkgOperationMsg(ChrootPkgOperationCode op, const char *pkg_name, const char *pkg_arch, const char *pkg_ver)
 {
     const char *op_str = "";
@@ -757,7 +771,6 @@ bool DiffPkgOperations()
             SeqDestroy(fields);
             continue;
         }
-        free(line);
 
         /* See RecordPkgOperationInChroot() */
         const char *op       = SeqAt(fields, 0);
@@ -765,9 +778,15 @@ bool DiffPkgOperations()
         const char *pkg_ver  = SeqAt(fields, 2);
         const char *pkg_arch = SeqAt(fields, 3);
 
-        /* These two must always be set properly. */
-        assert(!NULL_OR_EMPTY(op));
-        assert(!NULL_OR_EMPTY(pkg_name));
+        /* Skip records with an unknown operation code or no package name. */
+        if (!PkgOperationCodeIsValid(op) || (pkg_name[0] == '\0'))
+        {
+            Log(LOG_LEVEL_ERR, "Invalid package operation record: '%s'", line);
+            free(line);
+            SeqDestroy(fields);
+            continue;
+        }
+        free(line);
 
         /* We need to have a key for the map encoding package name and
          * architecture. Let's use the sequence "-_-" as a separator to avoid
@@ -949,7 +968,6 @@ bool ManifestPkgOperations()
             SeqDestroy(fields);
             continue;
         }
-        free(line);
 
         /* See RecordPkgOperationInChroot() */
         const char *op       = SeqAt(fields, 0);
@@ -957,9 +975,15 @@ bool ManifestPkgOperations()
         const char *pkg_ver  = SeqAt(fields, 2);
         const char *pkg_arch = SeqAt(fields, 3);
 
-        /* These two must always be set properly. */
-        assert(!NULL_OR_EMPTY(op));
-        assert(!NULL_OR_EMPTY(pkg_name));
+        /* Skip records with an unknown operation code or no package name. */
+        if (!PkgOperationCodeIsValid(op) || (pkg_name[0] == '\0'))
+        {
+            Log(LOG_LEVEL_ERR, "Invalid package operation record: '%s'", line);
+            free(line);
+            SeqDestroy(fields);
+            continue;
+        }
+        free(line);
 
         /* We need to have a key for the map encoding package name and
          * architecture. Let's use the sequence "-_-" as a separator to avoid
@@ -1024,10 +1048,15 @@ bool ManifestPkgOperations()
     }
     fclose(csv_file);
 
-    /* If there were package operations (the file with the records exists, which is checked above),
-     * there must be something to manifest. Otherwise, there's a flaw in the logic above,
-     * manipulating the maps. */
-    assert((MapSize(present) != 0) || (MapSize(absent) != 0));
+    if ((MapSize(present) == 0) && (MapSize(absent) == 0))
+    {
+        Log(LOG_LEVEL_INFO, "No present or absent packages to manifest");
+
+        MapDestroy(present);
+        MapDestroy(absent);
+
+        return true;
+    }
 
     Log(LOG_LEVEL_INFO, "Manifesting present and absent packages");
     MapIterator i = MapIteratorInit(present);
