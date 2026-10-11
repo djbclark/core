@@ -119,3 +119,14 @@ gh pr list -R cfengine/core --author djbclark --state open
 for n in 44 45 40 41 47 48 49; do gh pr view $n -R djbclark/core --json headRefOid -q .headRefOid; done
 sed -n '/^## B\. /,/^END BODY/p' ~/.local/state/handoffs/chains/standalone-3fd9/upstream-pr-texts-2026-10-09.md
 ```
+
+## Addendum 2026-10-10 — rule correction
+
+"One PR at a time, each on djbclark's explicit go" above understates the rule. djbclark
+clarified on 2026-10-10: only one of our PRs is open upstream at a time. B is neither offered
+nor sent until upstream has reviewed or merged #6389, and then still only on his go. As of
+2026-10-10 20:30 EDT #6389 has only the cf-bottom bot comment (10:48 UTC, pinging larsewi);
+we are waiting. Durable copies of the rule: `~/src/cfengine-all/AGENTS.md` item 11, memory
+note `one-upstream-pr-open-at-a-time`, and the Tier 1 log. Also this day: `.gitignore`
+`/graft/` drift traced to graft (trailhq/Graft#582); `GRAFT_NO_GITIGNORE=1` set on the graft
+MCP definitions and hooks, tree clean.
