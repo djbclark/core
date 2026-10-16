@@ -33,6 +33,7 @@
 #include <mod_files.h>
 #include <vars.h>
 #include <fncall.h>
+#include <class.h>
 #include <rlist.h>
 #include <set.h>
 #include <eval_context.h>
@@ -67,6 +68,8 @@ static const char *const POLICY_ERROR_PROMISE_ATTRIBUTE_NOT_SUPPORTED =
     "Common attribute '%s' not supported for custom promises, use '%s' instead (%s promises)";
 static const char *const POLICY_ERROR_PROMISE_TYPE_UNSUPPORTED =
     "Promise type '%s' not supported by '%s' bundle type";
+static const char *const POLICY_ERROR_BUNDLE_CALL_ARITY =
+    "Conflicting arity in calling bundle %s, expected %d arguments, %d given";
 
 static const char *const POLICY_ERROR_CONSTRAINT_TYPE_MISMATCH =
     "Type mismatch in constraint: %s";
@@ -576,6 +579,7 @@ static bool RvalTypeCheckDataType(RvalType rval_type, DataType expected_datatype
     case CF_DATA_TYPE_OPTION_LIST:
     case CF_DATA_TYPE_REAL_LIST:
     case CF_DATA_TYPE_STRING_LIST:
+    case CF_DATA_TYPE_BUNDLE_LIST:
         return (rval_type == RVAL_TYPE_SCALAR) || (rval_type == RVAL_TYPE_LIST);
 
     case CF_DATA_TYPE_CONTAINER:
@@ -2725,6 +2729,72 @@ static bool ValidateCustomPromise(const Promise *pp, Seq *errors)
     //       validate operation. https://northerntech.atlassian.net/browse/CFE-3430
 
     return valid;
+}
+
+static bool BundleCallCheckArity(const Promise *pp, const Constraint *cp, Rval rval, Seq *errors)
+{
+    if (rval.type != RVAL_TYPE_FNCALL)
+    {
+        return true;
+    }
+
+    // HACK: exploiting the fact that class-references and call-references are similar
+    FnCall *call = RvalFnCallValue(rval);
+    ClassRef ref = ClassRefParse(call->name);
+    if (!ClassRefIsQualified(ref))
+    {
+        ClassRefQualify(&ref, PromiseGetNamespace(pp));
+    }
+
+    const Bundle *callee = PolicyGetBundle(PolicyFromPromise(pp), ref.ns, "agent", ref.name);
+    if (!callee)
+    {
+        callee = PolicyGetBundle(PolicyFromPromise(pp), ref.ns, "common", ref.name);
+    }
+
+    ClassRefDestroy(ref);
+
+    if (callee != NULL)
+    {
+        if (RlistLen(call->args) != RlistLen(callee->args))
+        {
+            SeqAppend(errors, PolicyErrorNew(POLICY_ELEMENT_TYPE_CONSTRAINT, cp,
+                                             POLICY_ERROR_BUNDLE_CALL_ARITY,
+                                             call->name, RlistLen(callee->args), RlistLen(call->args)));
+            return false;
+        }
+    }
+    return true;
+}
+
+bool PromiseCheckBundleCallArity(const Promise *pp, const char *lval, Seq *errors)
+{
+    assert(pp != NULL);
+    assert(lval != NULL);
+
+    bool success = true;
+
+    for (size_t i = 0; i < SeqLength(pp->conlist); i++)
+    {
+        const Constraint *cp = SeqAt(pp->conlist, i);
+
+        // ensure: if call and callee are resolved, then they have matching arity
+        if (StringEqual(cp->lval, lval))
+        {
+            if (cp->rval.type == RVAL_TYPE_LIST)
+            {
+                for (const Rlist *rp = RvalRlistValue(cp->rval); rp != NULL; rp = rp->next)
+                {
+                    success &= BundleCallCheckArity(pp, cp, rp->val, errors);
+                }
+            }
+            else
+            {
+                success &= BundleCallCheckArity(pp, cp, cp->rval, errors);
+            }
+        }
+    }
+    return success;
 }
 
 static bool PromiseCheck(const Promise *pp, Seq *errors)
