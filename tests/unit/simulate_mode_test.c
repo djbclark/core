@@ -27,6 +27,7 @@
 #include <eval_context.h>       /* SetChangesChroot(), ToChangesChroot() */
 #include <changes_chroot.h>     /* CHROOT_PKGS_OPS_FILE */
 #include <file_lib.h>           /* DeleteDirectoryTree() */
+#include <string_lib.h>         /* StringContains() */
 
 #include <simulate_mode.h>
 
@@ -87,6 +88,51 @@ static void test_diff_install_cancels_removal(void)
     unlink(ToChangesChroot(CHROOT_PKGS_OPS_FILE));
 }
 
+/* A package recorded with both a version and an architecture must be
+ * reported with each in its own place. */
+static void test_diff_version_and_architecture(void)
+{
+    assert_true(RecordPkgOperationInChroot(CHROOT_PKG_OPERATION_INSTALL,
+                                           "foo", "1.2.3", "x86_64"));
+
+    char output[4096];
+    assert_true(call_with_captured_stdout(&DiffPkgOperations, output, sizeof(output)));
+
+    assert_true(strstr(output, "Package 'foo-x86_64 [1.2.3]' would be installed") != NULL);
+
+    unlink(ToChangesChroot(CHROOT_PKGS_OPS_FILE));
+}
+
+/* A removal with a version and no install record to cancel is a removal to
+ * report. */
+static void test_diff_removal_with_version(void)
+{
+    write_pkgs_ops("r,foo,1.0,\r\n");
+
+    char output[4096];
+    assert_true(call_with_captured_stdout(&DiffPkgOperations, output, sizeof(output)));
+
+    assert_true(StringContains(output, "Package 'foo [1.0]' would be removed"));
+
+    unlink(ToChangesChroot(CHROOT_PKGS_OPS_FILE));
+}
+
+/* A removal with a version that differs from the recorded installation would
+ * fail, so only the installation is reported. */
+static void test_diff_removal_with_other_version_keeps_install(void)
+{
+    write_pkgs_ops("i,foo,2.0,\r\n"
+                   "r,foo,1.0,\r\n");
+
+    char output[4096];
+    assert_true(call_with_captured_stdout(&DiffPkgOperations, output, sizeof(output)));
+
+    assert_true(StringContains(output, "Package 'foo [2.0]' would be installed"));
+    assert_false(StringContains(output, "would be removed"));
+
+    unlink(ToChangesChroot(CHROOT_PKGS_OPS_FILE));
+}
+
 static void test_manifest_install_cancels_removal(void)
 {
     write_pkgs_ops("r,foo,,\r\n"
@@ -101,6 +147,40 @@ static void test_manifest_install_cancels_removal(void)
     unlink(ToChangesChroot(CHROOT_PKGS_OPS_FILE));
 }
 
+/* Two recorded installations of the same package without a version must be
+ * reported once, not abort on comparing the empty versions. */
+static void test_diff_repeated_unversioned_install(void)
+{
+    write_pkgs_ops("i,foo,,\r\n"
+                   "i,foo,,\r\n");
+
+    char output[4096];
+    assert_true(call_with_captured_stdout(&DiffPkgOperations, output, sizeof(output)));
+
+    const char *msg = "Package 'foo' would be installed";
+    const char *first = strstr(output, msg);
+    assert_true(first != NULL);
+    assert_true(strstr(first + strlen(msg), "would be installed") == NULL);
+
+    unlink(ToChangesChroot(CHROOT_PKGS_OPS_FILE));
+}
+
+/* A versioned installation record is more specific than an unversioned one
+ * of the same package, so it is the one to report. */
+static void test_diff_unversioned_then_versioned_install(void)
+{
+    write_pkgs_ops("i,foo,,\r\n"
+                   "i,foo,1.2.3,\r\n");
+
+    char output[4096];
+    assert_true(call_with_captured_stdout(&DiffPkgOperations, output, sizeof(output)));
+
+    assert_true(strstr(output, "Package 'foo [1.2.3]' would be installed") != NULL);
+    assert_true(strstr(output, "Package 'foo' would be installed") == NULL);
+
+    unlink(ToChangesChroot(CHROOT_PKGS_OPS_FILE));
+}
+
 int main()
 {
     PRINT_TEST_BANNER();
@@ -111,7 +191,12 @@ int main()
     const UnitTest tests[] =
     {
         unit_test(test_diff_install_cancels_removal),
+        unit_test(test_diff_version_and_architecture),
+        unit_test(test_diff_removal_with_version),
+        unit_test(test_diff_removal_with_other_version_keeps_install),
         unit_test(test_manifest_install_cancels_removal),
+        unit_test(test_diff_repeated_unversioned_install),
+        unit_test(test_diff_unversioned_then_versioned_install),
     };
 
     int ret = run_tests(tests);

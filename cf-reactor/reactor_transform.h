@@ -27,16 +27,33 @@
 
 #include <eval_context.h>
 #include <policy.h>
+#include <watcher.h>     /* WatcherCheckResult */
 
 /**
  * @brief Evaluate every `bundle reactor NAME { ... }` in the given policy:
  * keep its "meta", "vars" and "classes" promises, and register a watcher
  * (see watcher.h) for each of its "events" promises.
  *
- * Safe to call again for every re-read of the policy: it first discards all
- * previously registered watchers (see WatcherRegistryClear()), so the
- * result always reflects only the given policy, not a stale prior one.
+ * Expects no watchers to be registered: on re-read of the policy, the
+ * watchers of the previous policy must be set aside with
+ * EventWatcherPause() before that policy is destroyed, as they refer to its
+ * promises.
  */
 void KeepReactorPromises(EvalContext *ctx, const Policy *policy);
+
+/**
+ * @brief Keep the events promise of a watcher that fired (see WatcherEventFn
+ * in watcher.h): run the bundle of its 'then' attribute, and record the
+ * outcome of the bundle as the outcome of the events promise. If the watcher
+ * failed to check for its event, record a failure instead.
+ *
+ * @param pp the unexpanded events promise the watcher was registered for
+ * @param promise_hash the hash of the expanded promise the watcher was
+ *                     registered with, selecting the iteration of the events
+ *                     promise to keep
+ * @param check whether the event happened or the watcher failed to check for
+ *              it (see WatcherEventFn)
+ */
+void HandleReactorEvent(EvalContext *ctx, const Promise *pp, const char *promise_hash, WatcherCheckResult check);
 
 #endif

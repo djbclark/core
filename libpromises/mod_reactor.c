@@ -25,13 +25,15 @@
 #include <mod_reactor.h>
 
 #include <syntax.h>
+#include <policy.h>
 
 static const ConstraintSyntax when_constraints[] =
 {
     CONSTRAINT_SYNTAX_GLOBAL,
 
     /* Row models */
-    ConstraintSyntaxNewString("file_deleted", CF_ANYSTRING, "File to react for on deletion", SYNTAX_STATUS_NORMAL),
+    ConstraintSyntaxNewString(REACTOR_FILE_DELETED, CF_ANYSTRING, "File to react for on deletion", SYNTAX_STATUS_NORMAL),
+    ConstraintSyntaxNewInt("interval", REACTOR_INTERVAL_RANGE, "Seconds between two checks for the event", SYNTAX_STATUS_NORMAL),
     ConstraintSyntaxNewNull()
 };
 
@@ -40,12 +42,17 @@ static const BodySyntax when_body = BodySyntaxNew("when", when_constraints, NULL
 static const ConstraintSyntax CF_EVENT_BODIES[] =
 {
     ConstraintSyntaxNewBody("when", &when_body, "Event to react to", SYNTAX_STATUS_NORMAL),
-    ConstraintSyntaxNewBundle("then", "Bundle to run on event", SYNTAX_STATUS_NORMAL),
+    ConstraintSyntaxNewBundleList("then", "Bundle or list of bundles to run in order on event", SYNTAX_STATUS_NORMAL),
     ConstraintSyntaxNewNull()
 };
 
+static bool EventsParseTreeCheck(const Promise *pp, Seq *errors)
+{
+    return PromiseCheckBundleCallArity(pp, "then", errors);
+}
+
 const PromiseTypeSyntax CF_REACTOR_PROMISE_TYPES[] =
 {
-    PromiseTypeSyntaxNew("reactor", "events", CF_EVENT_BODIES, NULL, SYNTAX_STATUS_NORMAL),
+    PromiseTypeSyntaxNew("reactor", "events", CF_EVENT_BODIES, &EventsParseTreeCheck, SYNTAX_STATUS_NORMAL),
     PromiseTypeSyntaxNewNull()
 };
