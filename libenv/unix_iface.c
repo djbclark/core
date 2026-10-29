@@ -1447,6 +1447,7 @@ void GetNetworkingInfo(EvalContext *ctx)
                         (default_route == NULL || metric_value < lowest_metric))
                     {
                         default_route = route;
+                        lowest_metric = metric_value;
                     }
                 }
             }

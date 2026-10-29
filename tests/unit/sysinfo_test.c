@@ -106,13 +106,62 @@ static void test_find_next_integer(void)
     }
 }
 
+#ifdef __linux__
+/*
+ * GetNetworkingInfo() reads /proc/<pid>/net/route, relocated here through
+ * CFENGINE_TEST_OVERRIDE_PROCDIR, and must pick the active default route
+ * with the lowest metric even when that route is listed last.
+ */
+static void test_default_route_lowest_metric(void)
+{
+    char procdir[] = "/tmp/sysinfo_test_proc.XXXXXX";
+    assert_true(mkdtemp(procdir) != NULL);
+
+    char route_file[PATH_MAX];
+    xsnprintf(route_file, sizeof(route_file),
+              "%s/proc/42/net/route", procdir);
+    assert_true(MakeParentDirectory(route_file, false, NULL));
+
+    FILE *fp = fopen(route_file, "w");
+    assert_true(fp != NULL);
+    fputs("Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask"
+          "\t\tMTU\tWindow\tIRTT\n"
+          "eth0\t00000000\t0102A8C0\t0003\t0\t0\t600\t00000000\t0\t0\t0\n"
+          "eth1\t00000000\t0101A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0\n",
+          fp);
+    fclose(fp);
+
+    setenv("CFENGINE_TEST_OVERRIDE_PROCDIR", procdir, 1);
+    setenv("CFENGINE_TEST_OVERRIDE_PROCPID", "42", 1);
+
+    EvalContext *ctx = EvalContextNew();
+    GetNetworkingInfo(ctx);
+
+    const JsonElement *inet = EvalContextVariableGetSpecial(
+        ctx, SPECIAL_SCOPE_SYS, "inet", NULL, false);
+    assert_true(inet != NULL);
+    const char *gateway = JsonObjectGetAsString(inet, "default_gateway");
+    assert_true(gateway != NULL);
+    assert_string_equal(gateway, "192.168.1.1");
+
+    EvalContextDestroy(ctx);
+    unsetenv("CFENGINE_TEST_OVERRIDE_PROCDIR");
+    unsetenv("CFENGINE_TEST_OVERRIDE_PROCPID");
+    DeleteDirectoryTree(procdir);
+    rmdir(procdir);
+}
+#endif /* __linux__ */
+
 int main()
 {
     PRINT_TEST_BANNER();
     const UnitTest tests[] =
     {
         unit_test(test_uptime),
-        unit_test(test_find_next_integer)
+        unit_test(test_find_next_integer),
+#ifdef __linux__
+        unit_test(test_default_route_lowest_metric),
+#endif
     };
 
     return run_tests(tests);
