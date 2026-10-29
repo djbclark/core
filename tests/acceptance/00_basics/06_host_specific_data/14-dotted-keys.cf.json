@@ -1,11 +1,4 @@
 {
-  "vars": {
-    "com.dotted.key": "dotted_value",
-    "myscope.myvar": "scoped_value"
-  },
-  "variables": {
-    "vcom.vdotted.vkey": {
-      "value": "dotted_value2"
-    }
-  }
+  "vars": { "com.dotted.key": "dotted_value", "myscope.myvar": "scoped_value" },
+  "variables": { "vcom.vdotted.vkey": { "value": "dotted_value2" } }
 }
