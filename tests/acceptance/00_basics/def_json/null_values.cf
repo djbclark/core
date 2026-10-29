@@ -54,17 +54,11 @@ bundle agent check
   methods:
     "vars"
       usebundle => dcs_passif_output(
-        $(vars_expected),
-        "",
-        $(vars_command),
-        $(this.promise_filename)
+        $(vars_expected), "", $(vars_command), $(this.promise_filename)
       );
 
     "classes"
       usebundle => dcs_passif_output(
-        $(classes_expected),
-        "",
-        $(classes_command),
-        $(this.promise_filename)
+        $(classes_expected), "", $(classes_command), $(this.promise_filename)
       );
 }
