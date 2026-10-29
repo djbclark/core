@@ -1,8 +1,6 @@
 body common control
 {
-  inputs => {
-    "../default.sub.cf",
-  };
+  inputs => { "../default.sub.cf" };
   bundlesequence => { default("$(this.promise_filename)") };
   version => "1.0";
 }
@@ -55,8 +53,10 @@ bundle agent check
 {
   classes:
     "loose_parent_error_logged"
-      expression => regline(".*Refusing to create the directory.*writable by other users.*",
-                            "$(G.testdir)$(const.dirsep)parent-loose.log"),
+      expression => regline(
+        ".*Refusing to create the directory.*writable by other users.*",
+        "$(G.testdir)$(const.dirsep)parent-loose.log"
+      ),
       if => fileexists("$(G.testdir)$(const.dirsep)parent-loose.log");
 
     "loose_parent_nothing_created"
@@ -64,12 +64,19 @@ bundle agent check
       if => fileexists("$(G.testdir)$(const.dirsep)parent-loose.log");
 
     "loose_parent_refused"
-      expression => not(returnszero("$(sys.cf_agent) -Kf $(this.promise_dirname)$(const.dirsep)keep_chroot_parent_perms.cf.sub --simulate=manifest --simulate-keep-chroot=$(test.refused)", "noshell")),
+      expression => not(
+        returnszero(
+          "$(sys.cf_agent) -Kf $(this.promise_dirname)$(const.dirsep)keep_chroot_parent_perms.cf.sub --simulate=manifest --simulate-keep-chroot=$(test.refused)",
+          "noshell"
+        )
+      ),
       if => fileexists("$(G.testdir)$(const.dirsep)parent-loose.log");
 
     "sticky_parent_kept_chroot"
-      expression => regline(".*Keeping changes chroot.*",
-                            "$(G.testdir)$(const.dirsep)parent-sticky.log"),
+      expression => regline(
+        ".*Keeping changes chroot.*",
+        "$(G.testdir)$(const.dirsep)parent-sticky.log"
+      ),
       if => fileexists("$(G.testdir)$(const.dirsep)parent-sticky.log");
 
     "sticky_parent_dir_mode_0700"
@@ -77,9 +84,13 @@ bundle agent check
       if => isdir("$(test.kept)");
 
     "ok"
-      expression => and("loose_parent_error_logged", "loose_parent_nothing_created",
-                        "loose_parent_refused", "sticky_parent_kept_chroot",
-                        "sticky_parent_dir_mode_0700");
+      expression => and(
+        "loose_parent_error_logged",
+        "loose_parent_nothing_created",
+        "loose_parent_refused",
+        "sticky_parent_kept_chroot",
+        "sticky_parent_dir_mode_0700"
+      );
 
   methods:
     "Pass/Fail"

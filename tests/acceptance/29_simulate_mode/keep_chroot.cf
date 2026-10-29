@@ -1,8 +1,6 @@
 body common control
 {
-  inputs => {
-    "../default.sub.cf",
-  };
+  inputs => { "../default.sub.cf" };
   bundlesequence => { default("$(this.promise_filename)") };
   version => "1.0";
 }
@@ -50,34 +48,50 @@ bundle agent check
 
   classes:
     "kept_copy_has_changes"
-      expression => strcmp(readfile("$(kept_copy)", 0),
-                           "This is the would-be content of the file."),
+      expression => strcmp(
+        readfile("$(kept_copy)", 0),
+        "This is the would-be content of the file."
+      ),
       if => fileexists("$(kept_copy)");
 
     "real_file_untouched"
-      expression => strcmp(readfile("$(G.testdir)$(const.dirsep)keep-chroot-file", 0),
-                           "This is the original content of the file."),
+      expression => strcmp(
+        readfile("$(G.testdir)$(const.dirsep)keep-chroot-file", 0),
+        "This is the original content of the file."
+      ),
       if => fileexists("$(G.testdir)$(const.dirsep)keep-chroot-file");
 
     "keep_notice_logged"
-      expression => regline(".*Keeping changes chroot.*",
-                            "$(G.testdir)$(const.dirsep)keep.log"),
+      expression => regline(
+        ".*Keeping changes chroot.*", "$(G.testdir)$(const.dirsep)keep.log"
+      ),
       if => fileexists("$(G.testdir)$(const.dirsep)keep.log");
 
     # The default.log check below makes sure this is not evaluated before the
     # run without --simulate-keep-chroot has actually happened
     "default_chroot_deleted"
-      expression => strcmp(length(findfiles("$(sys.statedir)$(const.dirsep)*.changes")), "0"),
+      expression => strcmp(
+        length(findfiles("$(sys.statedir)$(const.dirsep)*.changes")), "0"
+      ),
       if => fileexists("$(G.testdir)$(const.dirsep)default.log");
 
     "keep_requires_simulate"
-      expression => not(returnszero("$(sys.cf_agent) -Kf $(this.promise_dirname)$(const.dirsep)keep_chroot.cf.sub --simulate-keep-chroot=$(G.testdir)$(const.dirsep)unused.changes", "noshell")),
+      expression => not(
+        returnszero(
+          "$(sys.cf_agent) -Kf $(this.promise_dirname)$(const.dirsep)keep_chroot.cf.sub --simulate-keep-chroot=$(G.testdir)$(const.dirsep)unused.changes",
+          "noshell"
+        )
+      ),
       if => fileexists("$(G.testdir)$(const.dirsep)default.log");
 
     "ok"
-      expression => and("kept_copy_has_changes", "real_file_untouched",
-                        "keep_notice_logged", "default_chroot_deleted",
-                        "keep_requires_simulate");
+      expression => and(
+        "kept_copy_has_changes",
+        "real_file_untouched",
+        "keep_notice_logged",
+        "default_chroot_deleted",
+        "keep_requires_simulate"
+      );
 
   methods:
     "Pass/Fail"

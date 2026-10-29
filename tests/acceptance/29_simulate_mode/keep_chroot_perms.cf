@@ -1,8 +1,6 @@
 body common control
 {
-  inputs => {
-    "../default.sub.cf",
-  };
+  inputs => { "../default.sub.cf" };
   bundlesequence => { default("$(this.promise_filename)") };
   version => "1.0";
 }
@@ -13,8 +11,7 @@ bundle agent init
     "existing" string => "$(G.testdir)$(const.dirsep)existing.changes";
 
   files:
-    "$(existing)/."
-      create => "true";
+    "$(existing)/." create => "true";
 }
 
 bundle agent test
@@ -55,8 +52,10 @@ bundle agent check
 {
   classes:
     "umask_run_kept_chroot"
-      expression => regline(".*Keeping changes chroot.*",
-                            "$(G.testdir)$(const.dirsep)perms-umask.log"),
+      expression => regline(
+        ".*Keeping changes chroot.*",
+        "$(G.testdir)$(const.dirsep)perms-umask.log"
+      ),
       if => fileexists("$(G.testdir)$(const.dirsep)perms-umask.log");
 
     "umask_dir_mode_0700"
@@ -64,8 +63,10 @@ bundle agent check
       if => isdir("$(test.kept_umask)");
 
     "slash_run_kept_chroot"
-      expression => regline(".*Keeping changes chroot.*",
-                            "$(G.testdir)$(const.dirsep)perms-slash.log"),
+      expression => regline(
+        ".*Keeping changes chroot.*",
+        "$(G.testdir)$(const.dirsep)perms-slash.log"
+      ),
       if => fileexists("$(G.testdir)$(const.dirsep)perms-slash.log");
 
     # The trailing separator is stripped, the directory is created at the
@@ -75,18 +76,30 @@ bundle agent check
       if => isdir("$(test.kept_slash)");
 
     "existing_dir_error_logged"
-      expression => regline(".*Failed to create the directory.*for keeping the changes chroot.*",
-                            "$(G.testdir)$(const.dirsep)perms-existing.log"),
+      expression => regline(
+        ".*Failed to create the directory.*for keeping the changes chroot.*",
+        "$(G.testdir)$(const.dirsep)perms-existing.log"
+      ),
       if => fileexists("$(G.testdir)$(const.dirsep)perms-existing.log");
 
     "existing_dir_refused"
-      expression => not(returnszero("$(sys.cf_agent) -Kf $(this.promise_dirname)$(const.dirsep)keep_chroot_perms.cf.sub --simulate=manifest --simulate-keep-chroot=$(init.existing)", "noshell")),
+      expression => not(
+        returnszero(
+          "$(sys.cf_agent) -Kf $(this.promise_dirname)$(const.dirsep)keep_chroot_perms.cf.sub --simulate=manifest --simulate-keep-chroot=$(init.existing)",
+          "noshell"
+        )
+      ),
       if => fileexists("$(G.testdir)$(const.dirsep)perms-existing.log");
 
     "ok"
-      expression => and("umask_run_kept_chroot", "umask_dir_mode_0700",
-                        "slash_run_kept_chroot", "slash_dir_mode_0700",
-                        "existing_dir_error_logged", "existing_dir_refused");
+      expression => and(
+        "umask_run_kept_chroot",
+        "umask_dir_mode_0700",
+        "slash_run_kept_chroot",
+        "slash_dir_mode_0700",
+        "existing_dir_error_logged",
+        "existing_dir_refused"
+      );
 
   methods:
     "Pass/Fail"
