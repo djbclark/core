@@ -41,13 +41,23 @@
 #include <map.h>                /* StringMap */
 #include <csv_parser.h>         /* GetCsvLineNext() */
 #include <unix.h>               /* GetGroupName(), GetUserName() */
+#include <json.h>               /* JsonElement */
+#include <writer.h>             /* StringWriter() */
+#include <hash.h>               /* HashFile(), HashPrintSafe() */
+#include <definitions.h>        /* CF_PERMS_DEFAULT */
+#include <openssl/rand.h>       /* RAND_bytes() */
 
 #include <simulate_mode.h>
 
 #define DELIM_CHAR '='
+#define CHANGES_JSON_FORMAT_VERSION 1
 
 /* Taken from coreutils/lib/stat-macros.h. */
+#ifndef __MINGW32__
 #define CHMOD_MODE_BITS (S_ISUID | S_ISGID | S_ISVTX | S_IRWXU | S_IRWXG | S_IRWXO)
+#else
+#define CHMOD_MODE_BITS (S_IRWXU | S_IRWXG | S_IRWXO)
+#endif
 
 static inline void PrintDelimiter()
 {
@@ -646,15 +656,19 @@ bool DiffChangedFiles(StringSet **audited_files)
 
 
 typedef struct PkgOperationRecord_ {
-    char *msg;
+    char *pkg_name;
+    char *pkg_arch;
     char *pkg_ver;
 } PkgOperationRecord;
 
-static PkgOperationRecord *PkgOperationRecordNew(char *msg, char *pkg_ver)
+static PkgOperationRecord *PkgOperationRecordNew(const char *pkg_name,
+                                                 const char *pkg_arch,
+                                                 const char *pkg_ver)
 {
     PkgOperationRecord *ret = xmalloc(sizeof(PkgOperationRecord));
-    ret->msg = msg;
-    ret->pkg_ver = pkg_ver;
+    ret->pkg_name = xstrdup(pkg_name);
+    ret->pkg_arch = SafeStringDuplicate(pkg_arch);
+    ret->pkg_ver = SafeStringDuplicate(pkg_ver);
 
     return ret;
 }
@@ -663,7 +677,8 @@ static void PkgOperationRecordDestroy(PkgOperationRecord *pkg_op)
 {
     if (pkg_op != NULL)
     {
-        free(pkg_op->msg);
+        free(pkg_op->pkg_name);
+        free(pkg_op->pkg_arch);
         free(pkg_op->pkg_ver);
         free(pkg_op);
     }
@@ -727,12 +742,36 @@ static inline char *GetPkgOperationMsg(ChrootPkgOperationCode op, const char *pk
     return msg;
 }
 
-bool DiffPkgOperations()
+static void PrintPkgOperations(Map *pkg_ops, ChrootPkgOperationCode op)
 {
+    assert(pkg_ops != NULL);
+
+    MapIterator i = MapIteratorInit(pkg_ops);
+    MapKeyValue *item;
+    while ((item = MapIteratorNext(&i)))
+    {
+        const PkgOperationRecord *record = item->value;
+        char *msg = GetPkgOperationMsg(op, record->pkg_name,
+                                       record->pkg_arch, record->pkg_ver);
+        puts(msg);
+        free(msg);
+    }
+}
+
+/* Reduces the recorded package operations to the net sets of packages that
+ * would be installed and removed (maps of PkgOperationRecord), or sets both
+ * to NULL if no package operations were recorded. */
+static bool CollectPkgOperations(Map **installed_out, Map **removed_out)
+{
+    assert(installed_out != NULL);
+    assert(removed_out != NULL);
+
+    *installed_out = NULL;
+    *removed_out = NULL;
+
     const char *pkgs_ops_csv_file = ToChangesChroot(CHROOT_PKGS_OPS_FILE);
     if (access(pkgs_ops_csv_file, F_OK) != 0)
     {
-        Log(LOG_LEVEL_INFO, "No package operations done by the agent run");
         return true;
     }
 
@@ -785,7 +824,7 @@ bool DiffPkgOperations()
              * and so the package is still seen as present in the system (package cache).
              *
              * This means that a 'present' operation after 'remove' operation results in no
-             * difference (the package would be installed back) so the potential message about the
+             * difference (the package would be installed back) so the potential record of the
              * removal should be removed. */
             MapRemove(removed, name_arch);
         }
@@ -793,7 +832,7 @@ bool DiffPkgOperations()
         {
             /* The same logic as above applies here for an originally absent package that is
              * installed and then reported as absent again. No diff to report, just remove the
-             * message about the package installation. */
+             * record of the package installation. */
 
             /* However, if a different specific version is reported as absent than the version that
              * would have been installed, this removal would not remove the installed package
@@ -827,11 +866,13 @@ bool DiffPkgOperations()
             MapRemove(removed, name_arch);
 
             PkgOperationRecord *prev_record = MapGet(installed, name_arch);
-            if ((prev_record == NULL) || PkgVersionIsGreater(pkg_ver, prev_record->pkg_ver))
+            if ((prev_record == NULL) ||
+                (NULL_OR_EMPTY(prev_record->pkg_ver) && !NULL_OR_EMPTY(pkg_ver)) ||
+                (!NULL_OR_EMPTY(pkg_ver) && !NULL_OR_EMPTY(prev_record->pkg_ver) &&
+                 PkgVersionIsGreater(pkg_ver, prev_record->pkg_ver)))
             {
-                char *msg = GetPkgOperationMsg(CHROOT_PKG_OPERATION_CODE_INSTALL,
-                                               pkg_name, pkg_arch, pkg_ver);
-                PkgOperationRecord *record = PkgOperationRecordNew(msg, SafeStringDuplicate(pkg_ver));
+                PkgOperationRecord *record =
+                    PkgOperationRecordNew(pkg_name, pkg_arch, pkg_ver);
                 MapInsert(installed, name_arch, record);
                 name_arch = NULL; /* name_arch is now owned by the map (as a key) */
             }
@@ -841,10 +882,10 @@ bool DiffPkgOperations()
             assert(*op == CHROOT_PKG_OPERATION_CODE_REMOVE); /* The only option not covered above. */
 
             /* If there is a previous 'remove' operation record with version specified, prefer that
-             * message over a new message without version specification as the net result would be
+             * record over a new record without version specification as the net result would be
              * the package being removed, in the version that was pressent. */
             PkgOperationRecord *prev_record = MapGet(removed, name_arch);
-            bool insert_new_msg = ((prev_record == NULL) || (NULL_OR_EMPTY(prev_record->pkg_ver)));
+            bool insert_new_record = ((prev_record == NULL) || (NULL_OR_EMPTY(prev_record->pkg_ver)));
 
             /* If there is a previous 'install' operation and now there is a 'remove' operation it
              * means that the package was initially present, then updated by the 'install' operation
@@ -855,7 +896,7 @@ bool DiffPkgOperations()
              * would remove the installed package. */
             if (NULL_OR_EMPTY(pkg_ver))
             {
-                /* No version specified, remove the installation message (if any). */
+                /* No version specified, remove the installation record (if any). */
                 MapRemove(installed, name_arch);
             }
             else
@@ -865,18 +906,17 @@ bool DiffPkgOperations()
                 {
                     MapRemove(installed, name_arch);
                 }
-                else
+                else if (inst_record != NULL)
                 {
-                    /* Keeping the install message, the removal would make no change. */
-                    insert_new_msg = false;
+                    /* Keeping the install record, the removal would make no change. */
+                    insert_new_record = false;
                 }
             }
 
-            if (insert_new_msg)
+            if (insert_new_record)
             {
-                char *msg = GetPkgOperationMsg(CHROOT_PKG_OPERATION_CODE_REMOVE,
-                                               pkg_name, pkg_arch, pkg_ver);
-                PkgOperationRecord *record = PkgOperationRecordNew(msg, SafeStringDuplicate(pkg_ver));
+                PkgOperationRecord *record =
+                    PkgOperationRecordNew(pkg_name, pkg_arch, pkg_ver);
                 MapInsert(removed, name_arch, record);
                 name_arch = NULL; /* name_arch is now owned by the map (as a key) */
             }
@@ -885,6 +925,27 @@ bool DiffPkgOperations()
         free(name_arch);
     }
     fclose(csv_file);
+
+    *installed_out = installed;
+    *removed_out = removed;
+
+    return true;
+}
+
+bool DiffPkgOperations()
+{
+    Map *installed;
+    Map *removed;
+    if (!CollectPkgOperations(&installed, &removed))
+    {
+        return false;
+    }
+
+    if (installed == NULL)
+    {
+        Log(LOG_LEVEL_INFO, "No package operations done by the agent run");
+        return true;
+    }
 
     if ((MapSize(installed) == 0) && (MapSize(removed) == 0))
     {
@@ -897,21 +958,8 @@ bool DiffPkgOperations()
     }
 
     Log(LOG_LEVEL_INFO, "Showing differences in installed packages");
-    MapIterator i = MapIteratorInit(installed);
-    MapKeyValue *item;
-    while ((item = MapIteratorNext(&i)))
-    {
-        PkgOperationRecord *value = item->value;
-        const char *msg = value->msg;
-        puts(msg);
-    }
-    i = MapIteratorInit(removed);
-    while ((item = MapIteratorNext(&i)))
-    {
-        PkgOperationRecord *value = item->value;
-        const char *msg = value->msg;
-        puts(msg);
-    }
+    PrintPkgOperations(installed, CHROOT_PKG_OPERATION_CODE_INSTALL);
+    PrintPkgOperations(removed, CHROOT_PKG_OPERATION_CODE_REMOVE);
 
     MapDestroy(installed);
     MapDestroy(removed);
@@ -970,10 +1018,10 @@ bool ManifestPkgOperations()
         if ((*op == CHROOT_PKG_OPERATION_CODE_INSTALL) ||
             (*op == CHROOT_PKG_OPERATION_CODE_PRESENT))
         {
-            /* If there is a previous install/present operation, we want to choose the message with
-             * the higher version or the message which has a specific version (if any). */
+            /* If there is a previous install/present operation, we want to choose the record with
+             * the higher version or the record which has a specific version (if any). */
 
-            /* Cancels any previous remove/absent message. */
+            /* Cancels any previous remove/absent record. */
             MapRemove(absent, name_arch);
 
             PkgOperationRecord *prev_record = MapGet(present, name_arch);
@@ -982,9 +1030,8 @@ bool ManifestPkgOperations()
                 (!NULL_OR_EMPTY(pkg_ver) && !NULL_OR_EMPTY(prev_record->pkg_ver) &&
                  PkgVersionIsGreater(pkg_ver, prev_record->pkg_ver)))
             {
-                char *msg = GetPkgOperationMsg(CHROOT_PKG_OPERATION_CODE_PRESENT,
-                                               pkg_name, pkg_arch, pkg_ver);
-                PkgOperationRecord *record = PkgOperationRecordNew(msg, SafeStringDuplicate(pkg_ver));
+                PkgOperationRecord *record =
+                    PkgOperationRecordNew(pkg_name, pkg_arch, pkg_ver);
                 MapInsert(present, name_arch, record);
                 name_arch = NULL; /* name_arch is now owned by the map (as a key) */
             }
@@ -994,7 +1041,7 @@ bool ManifestPkgOperations()
             assert((*op == CHROOT_PKG_OPERATION_CODE_REMOVE) ||
                    (*op == CHROOT_PKG_OPERATION_CODE_ABSENT));
 
-            /* If there is a 'present' message with a different version than the version specified
+            /* If there is a 'present' record with a different version than the version specified
              * here (if any), we know that the removal would fail and so it should not be
              * reported. */
             PkgOperationRecord *present_record = MapGet(present, name_arch);
@@ -1002,18 +1049,17 @@ bool ManifestPkgOperations()
                 NULL_OR_EMPTY(present_record->pkg_ver) || NULL_OR_EMPTY(pkg_ver) ||
                 StringEqual(present_record->pkg_ver, pkg_ver))
             {
-                /* Remove the 'present' message now that we know the removal would/should work. */
+                /* Remove the 'present' record now that we know the removal would/should work. */
                 MapRemove(present, name_arch);
 
-                /* If there is a previous 'absent' message, we want to use the message with no
+                /* If there is a previous 'absent' record, we want to use the record with no
                  * version specification (if any) because it's more generic. */
                 PkgOperationRecord *prev_record = MapGet(absent, name_arch);
                 if ((prev_record == NULL) ||
                     (!NULL_OR_EMPTY(prev_record->pkg_ver) && NULL_OR_EMPTY(pkg_ver)))
                 {
-                    char *msg = GetPkgOperationMsg(CHROOT_PKG_OPERATION_CODE_ABSENT,
-                                                   pkg_name, pkg_arch, pkg_ver);
-                    PkgOperationRecord *record = PkgOperationRecordNew(msg, SafeStringDuplicate(pkg_ver));
+                    PkgOperationRecord *record =
+                        PkgOperationRecordNew(pkg_name, pkg_arch, pkg_ver);
                     MapInsert(absent, name_arch, record);
                     name_arch = NULL; /* name_arch is now owned by the map (as a key) */
                 }
@@ -1030,24 +1076,359 @@ bool ManifestPkgOperations()
     assert((MapSize(present) != 0) || (MapSize(absent) != 0));
 
     Log(LOG_LEVEL_INFO, "Manifesting present and absent packages");
-    MapIterator i = MapIteratorInit(present);
-    MapKeyValue *item;
-    while ((item = MapIteratorNext(&i)))
-    {
-        PkgOperationRecord *value = item->value;
-        const char *msg = value->msg;
-        puts(msg);
-    }
-    i = MapIteratorInit(absent);
-    while ((item = MapIteratorNext(&i)))
-    {
-        PkgOperationRecord *value = item->value;
-        const char *msg = value->msg;
-        puts(msg);
-    }
+    PrintPkgOperations(present, CHROOT_PKG_OPERATION_CODE_PRESENT);
+    PrintPkgOperations(absent, CHROOT_PKG_OPERATION_CODE_ABSENT);
 
     MapDestroy(present);
     MapDestroy(absent);
 
     return true;
+}
+
+
+/* Returns NULL for a path that exists neither in the changes chroot nor
+ * outside of it, e.g. a file created and deleted by the same run. */
+static JsonElement *ChangedFileAsJson(const char *path)
+{
+    assert(path != NULL);
+
+    const char *chrooted_path = ToChangesChroot(path);
+    struct stat st_orig;
+    struct stat st;
+    const bool existed = (lstat(path, &st_orig) == 0);
+    if (lstat(chrooted_path, &st) == -1)
+    {
+        if (!existed)
+        {
+            return NULL;
+        }
+        JsonElement *file_info = JsonObjectCreate(2);
+        JsonObjectAppendString(file_info, "path", path);
+        JsonObjectAppendString(file_info, "change", "deleted");
+        return file_info;
+    }
+
+    JsonElement *file_info = JsonObjectCreate(9);
+    JsonObjectAppendString(file_info, "path", path);
+    JsonObjectAppendString(file_info, "change",
+                           existed ? "modified" : "created");
+    JsonObjectAppendString(file_info, "type",
+                           GetFileTypeDescription(st.st_mode));
+    if (existed && ((st_orig.st_mode & S_IFMT) != (st.st_mode & S_IFMT)))
+    {
+        JsonObjectAppendString(file_info, "previous_type",
+                               GetFileTypeDescription(st_orig.st_mode));
+    }
+
+    /* The permissions of a symbolic link are meaningless and differ between
+     * platforms. */
+    if (!S_ISLNK(st.st_mode))
+    {
+        char perms[5];
+        xsnprintf(perms, sizeof(perms), "%04o",
+                  st.st_mode & CHMOD_MODE_BITS);
+        JsonObjectAppendString(file_info, "permissions", perms);
+    }
+
+    /* 64-bit, so that e.g. uid 4294967294 is not written as -2. */
+    JsonObjectAppendInteger64(file_info, "uid", (int64_t) st.st_uid);
+    JsonObjectAppendInteger64(file_info, "gid", (int64_t) st.st_gid);
+
+    if (S_ISREG(st.st_mode))
+    {
+        JsonObjectAppendInteger64(file_info, "size", (int64_t) st.st_size);
+
+        /* HashFile() cannot report failure, it leaves the digest zeroed
+         * and logs the cause at the INFO level. */
+        static const unsigned char no_digest[EVP_MAX_MD_SIZE + 1] = {0};
+        unsigned char digest[EVP_MAX_MD_SIZE + 1];
+        HashFile(chrooted_path, digest, HASH_METHOD_SHA256, false);
+        if (memcmp(digest, no_digest, sizeof(digest)) != 0)
+        {
+            char digest_str[CF_HOSTKEY_STRING_SIZE];
+            HashPrintSafe(digest_str, sizeof(digest_str), digest,
+                          HASH_METHOD_SHA256, false);
+            JsonObjectAppendString(file_info, "sha256", digest_str);
+        }
+        else
+        {
+            Log(LOG_LEVEL_ERR,
+                "Failed to compute the SHA-256 digest of '%s'",
+                chrooted_path);
+        }
+    }
+#ifndef __MINGW32__
+    else if (S_ISLNK(st.st_mode))
+    {
+        char target[PATH_MAX] = {0};
+        if (readlink(chrooted_path, target, sizeof(target) - 1) > 0)
+        {
+            const char *real_target = target;
+            if (IsAbsoluteFileName(target))
+            {
+                real_target = ToNormalRoot(target);
+            }
+            JsonObjectAppendString(file_info, "target", real_target);
+        }
+    }
+#endif  /* !__MINGW32__ */
+
+    return file_info;
+}
+
+/* Appends the length-prefixed strings in #list_file (in the changes chroot)
+ * to #records. A missing #list_file means no records. #file_category is
+ * "changed" or "renamed", for the log messages. */
+static bool ReadChrootRecords(const char *list_file, const char *file_category,
+                              Seq *records)
+{
+    assert(list_file != NULL);
+    assert(file_category != NULL);
+    assert(records != NULL);
+
+    const char *path = ToChangesChroot(list_file);
+    if (access(path, F_OK) != 0)
+    {
+        return true;
+    }
+
+    int fd = safe_open(path, O_RDONLY);
+    if (fd == -1)
+    {
+        Log(LOG_LEVEL_ERR, "Failed to open the file with list of %s files: %s",
+            file_category, GetErrorStr());
+        return false;
+    }
+
+    char *record;
+    int ret;
+    while ((ret = ReadLenPrefixedString(fd, &record)) > 0)
+    {
+        SeqAppend(records, record);
+    }
+    close(fd);
+
+    if (ret < 0)
+    {
+        Log(LOG_LEVEL_ERR, "Failed to read the list of %s files",
+            file_category);
+        return false;
+    }
+    return true;
+}
+
+static bool AddChangedFilesToJson(JsonElement *files)
+{
+    assert(files != NULL);
+
+    Seq *paths = SeqNew(16, free);
+    const bool success =
+        ReadChrootRecords(CHROOT_CHANGES_LIST_FILE, "changed", paths);
+    if (success)
+    {
+        /* Each file should only be reported once. */
+        StringSet *reported = StringSetNew();
+        const size_t n_paths = SeqLength(paths);
+        for (size_t i = 0; i < n_paths; i++)
+        {
+            const char *path = SeqAt(paths, i);
+            if (!StringSetContains(reported, path))
+            {
+                JsonElement *file_info = ChangedFileAsJson(path);
+                if (file_info != NULL)
+                {
+                    JsonArrayAppendObject(files, file_info);
+                }
+                StringSetAdd(reported, xstrdup(path));
+            }
+        }
+        StringSetDestroy(reported);
+    }
+    SeqDestroy(paths);
+    return success;
+}
+
+static bool AddRenamedFilesToJson(JsonElement *renames)
+{
+    assert(renames != NULL);
+
+    Seq *names = SeqNew(16, free);
+    bool success =
+        ReadChrootRecords(CHROOT_RENAMES_LIST_FILE, "renamed", names);
+    const size_t n_names = SeqLength(names);
+    if (success && ((n_names % 2) != 0))
+    {
+        /* Pairs of the original and the new name, see
+         * RecordFileRenamedInChroot(). */
+        Log(LOG_LEVEL_ERR, "Invalid data about renamed files");
+        success = false;
+    }
+    for (size_t i = 0; success && (i < n_names); i += 2)
+    {
+        JsonElement *rename = JsonObjectCreate(2);
+        JsonObjectAppendString(rename, "old_name", SeqAt(names, i));
+        JsonObjectAppendString(rename, "new_name", SeqAt(names, i + 1));
+        JsonArrayAppendObject(renames, rename);
+    }
+    SeqDestroy(names);
+    return success;
+}
+
+static void JsonArrayAppendPkgOperations(JsonElement *packages, Map *pkg_ops,
+                                         const char *operation)
+{
+    assert(packages != NULL);
+    assert(pkg_ops != NULL);
+
+    MapIterator i = MapIteratorInit(pkg_ops);
+    MapKeyValue *item;
+    while ((item = MapIteratorNext(&i)))
+    {
+        const PkgOperationRecord *record = item->value;
+        JsonElement *op_info = JsonObjectCreate(4);
+        JsonObjectAppendString(op_info, "operation", operation);
+        JsonObjectAppendString(op_info, "name", record->pkg_name);
+        if (!NULL_OR_EMPTY(record->pkg_ver))
+        {
+            JsonObjectAppendString(op_info, "version", record->pkg_ver);
+        }
+        if (!NULL_OR_EMPTY(record->pkg_arch))
+        {
+            JsonObjectAppendString(op_info, "architecture", record->pkg_arch);
+        }
+        JsonArrayAppendObject(packages, op_info);
+    }
+}
+
+/* Orders the array by package name and architecture. That is a total order
+ * because CollectPkgOperations() keeps each package in at most one of its two
+ * maps: an installation record cancels any removal record and vice versa. */
+static int ComparePkgOperations(const JsonElement *a, const JsonElement *b,
+                                ARG_UNUSED void *user_data)
+{
+    int ret = StringSafeCompare(JsonObjectGetAsString(a, "name"),
+                                JsonObjectGetAsString(b, "name"));
+    if (ret == 0)
+    {
+        ret = StringSafeCompare(JsonObjectGetAsString(a, "architecture"),
+                                JsonObjectGetAsString(b, "architecture"));
+    }
+    return ret;
+}
+
+static bool AddPkgOperationsToJson(JsonElement *packages)
+{
+    assert(packages != NULL);
+
+    Map *installed;
+    Map *removed;
+    if (!CollectPkgOperations(&installed, &removed))
+    {
+        return false;
+    }
+    if (installed != NULL)
+    {
+        JsonArrayAppendPkgOperations(packages, installed, "install");
+        JsonArrayAppendPkgOperations(packages, removed, "remove");
+        MapDestroy(installed);
+        MapDestroy(removed);
+
+        /* The maps have no stable order. */
+        JsonSort(packages, ComparePkgOperations, NULL);
+    }
+    return true;
+}
+
+bool WriteChangesJson(const char *output_file, bool failsafe_fallback,
+                      bool aborted)
+{
+    assert(output_file != NULL);
+
+    JsonElement *json = JsonObjectCreate(5);
+    JsonObjectAppendInteger(json, "format_version",
+                            CHANGES_JSON_FORMAT_VERSION);
+    JsonObjectAppendBool(json, "failsafe_fallback", failsafe_fallback);
+    JsonObjectAppendBool(json, "aborted", aborted);
+    JsonElement *files = JsonArrayCreate(16);
+    JsonObjectAppendArray(json, "files", files);
+    JsonElement *renames = JsonArrayCreate(16);
+    JsonObjectAppendArray(json, "renames", renames);
+    JsonElement *packages = JsonArrayCreate(16);
+    JsonObjectAppendArray(json, "packages", packages);
+    if (!AddChangedFilesToJson(files) || !AddRenamedFilesToJson(renames) ||
+        !AddPkgOperationsToJson(packages))
+    {
+        JsonDestroy(json);
+        return false;
+    }
+
+    Log(LOG_LEVEL_INFO, "Writing the simulated change set to '%s'",
+        output_file);
+
+    Writer *writer = StringWriter();
+    JsonWrite(writer, json, 0);
+    WriterWrite(writer, "\n");
+    JsonDestroy(json);
+    char *document = StringWriterClose(writer);
+
+    /* Written to a new file which is then renamed into place, so that a
+     * failed write leaves an existing #output_file intact and a symbolic
+     * link at #output_file is replaced rather than followed. */
+    unsigned char random_bytes[8];
+    if (RAND_bytes(random_bytes, sizeof(random_bytes)) != 1)
+    {
+        Log(LOG_LEVEL_ERR, "Failed to generate a temporary name for '%s'",
+            output_file);
+        free(document);
+        return false;
+    }
+    char random_hex[2 * sizeof(random_bytes) + 1];
+    StringBytesToHex(random_hex, sizeof(random_hex),
+                     random_bytes, sizeof(random_bytes));
+    char *tmp_file;
+    xasprintf(&tmp_file, "%s.%s" CF_NEW, output_file, random_hex);
+
+    bool success = false;
+    int fd = safe_open_create_perms(tmp_file, O_WRONLY | O_CREAT | O_EXCL,
+                                    CF_PERMS_DEFAULT);
+    if (fd == -1)
+    {
+        Log(LOG_LEVEL_ERR,
+            "Failed to create '%s' for the simulated change set: %s",
+            tmp_file, GetErrorStr());
+    }
+    else
+    {
+        const size_t document_len = strlen(document);
+        if (FullWrite(fd, document, document_len) != (ssize_t) document_len)
+        {
+            Log(LOG_LEVEL_ERR,
+                "Failed to write the simulated change set to '%s': %s",
+                tmp_file, GetErrorStr());
+            close(fd);
+        }
+        else if (close(fd) == -1)
+        {
+            Log(LOG_LEVEL_ERR,
+                "Failed to close the simulated change set '%s': %s",
+                tmp_file, GetErrorStr());
+        }
+        else if (rename(tmp_file, output_file) == -1)
+        {
+            Log(LOG_LEVEL_ERR, "Failed to rename '%s' to '%s': %s",
+                tmp_file, output_file, GetErrorStr());
+        }
+        else
+        {
+            success = true;
+        }
+
+        if (!success)
+        {
+            unlink(tmp_file);
+        }
+    }
+    free(tmp_file);
+    free(document);
+    return success;
 }

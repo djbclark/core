@@ -95,6 +95,7 @@ typedef struct
             char *show_evaluated_classes;
             char *show_evaluated_variables;
             char *simulate_keep_chroot; // --simulate-keep-chroot
+            char *simulate_json_file;
 
             // BODY AGENT CONTROL
             bool report_class_log;
