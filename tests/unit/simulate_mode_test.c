@@ -273,6 +273,19 @@ static void test_diff_unversioned_then_versioned_install(void)
     unlink(ToChangesChroot(CHROOT_PKGS_OPS_FILE));
 }
 
+/* Reads the raw bytes of the output file. The encoding tests below need
+ * them because JsonParseFile() decodes a "\u00XX" escape into the raw byte
+ * 0xXX, so it cannot tell a (wrongly) escaped byte from a raw one. */
+static void read_output_file_raw(char *buf, size_t buf_size)
+{
+    FILE *file = fopen(OUTPUT_FILE, "r");
+    assert_true(file != NULL);
+    size_t n_read = fread(buf, 1, buf_size - 1, file);
+    fclose(file);
+    assert_true(n_read > 0);
+    buf[n_read] = '\0';
+}
+
 static void test_empty_change_set(void)
 {
     reset_records();
@@ -588,6 +601,68 @@ static void test_pkg_operations_sorted(void)
     JsonDestroy(json);
 }
 
+#ifndef __MINGW32__
+/* A UTF-8 character next to characters JSON escapes; the quote and the
+ * backslash keep this off Windows, like test_special_characters_in_path(). */
+static void test_utf8_in_path(void)
+{
+    reset_records();
+
+    const char *const path = "/simulate-test/w\xC3\xA9" "ird \"file\" \\ name";
+    create_chroot_file(path, "", 0600);
+    write_records(CHROOT_CHANGES_LIST_FILE, &path, 1);
+
+    JsonElement *json = write_and_parse_changes();
+    JsonElement *files = JsonObjectGetAsArray(json, "files");
+    assert_int_equal(JsonLength(files), 1);
+
+    /* The path must survive JSON escaping and parsing untouched. */
+    JsonElement *file_info = JsonArrayGetAsObject(files, 0);
+    assert_string_equal(JsonObjectGetAsString(file_info, "path"), path);
+    assert_string_equal(JsonObjectGetAsString(file_info, "change"), "created");
+
+    JsonDestroy(json);
+
+    /* The UTF-8 character must appear in the document as its raw bytes --
+     * as per-byte "\u00XX" escapes, a conformant JSON parser would decode
+     * it as two wrong characters. */
+    char raw[4096];
+    read_output_file_raw(raw, sizeof(raw));
+    assert_true(strstr(raw, "w\xC3\xA9" "ird") != NULL);
+    assert_true(strstr(raw, "\\u00c3") == NULL);
+}
+#endif  /* !__MINGW32__ */
+
+static void test_invalid_utf8_in_path(void)
+{
+    reset_records();
+
+    /* File names are not guaranteed to be valid UTF-8. A byte that is not
+     * part of a valid UTF-8 sequence has to stay escaped as "\u00XX" --
+     * raw, it would make the whole document invalid UTF-8. No file is
+     * created here (the file system may refuse such a name), so the name
+     * is recorded as a rename, which needs no file to get it into the
+     * document. */
+    const char *const names[] = {"/simulate-test/latin1-\xE9-name",
+                                 "/simulate-test/new-name"};
+    write_records(CHROOT_RENAMES_LIST_FILE, names, 2);
+
+    /* "\u00e9" denotes U+00E9, so a conformant parser (libntech's, since
+     * CFE-4730) reads the escaped byte back as the two bytes c3 a9: a name
+     * that is not valid UTF-8 cannot round-trip through a JSON document.
+     * What the document must guarantee is that the byte is escaped, not
+     * written raw (below). */
+    JsonElement *json = write_and_parse_changes();
+    assert_string_equal(
+        JsonObjectGetAsString(get_single(json, "renames"), "old_name"),
+        "/simulate-test/latin1-\xC3\xA9-name");
+    JsonDestroy(json);
+
+    char raw[4096];
+    read_output_file_raw(raw, sizeof(raw));
+    assert_true(strstr(raw, "\\u00e9") != NULL);
+}
+
 static void test_write_failure(void)
 {
     reset_records();
@@ -650,6 +725,10 @@ int main()
         unit_test(test_created_and_deleted_file_not_reported),
         unit_test(test_modified_file),
         unit_test(test_changed_file_type),
+#ifndef __MINGW32__
+        unit_test(test_utf8_in_path),
+#endif
+        unit_test(test_invalid_utf8_in_path),
 #ifndef __MINGW32__
         unit_test(test_created_symlink),
 #endif
