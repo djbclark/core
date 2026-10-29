@@ -31,8 +31,10 @@
 /* The alarm fired. */
 static volatile sig_atomic_t TIMEOUT_FIRED = 0; /* GLOBAL_X */
 
-/* ...and had a process to signal. The alarm can fire with ALARM_PID already
- * cleared, i.e. timed out but never terminated. */
+/* ...and had a process to signal. The alarm can still fire with no process
+ * registered -- before cf_popen() has forked, or after cf_pclose() has reaped
+ * a child that finished just under the wire -- i.e. timed out but never
+ * terminated. */
 static volatile sig_atomic_t TIMEOUT_SIGNALLED = 0; /* GLOBAL_X */
 
 /* An alarm is pending. */

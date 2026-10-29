@@ -38,6 +38,7 @@
 static bool CfSetuid(uid_t uid, gid_t gid);
 
 static int cf_pwait(pid_t pid);
+static void ClearAlarmedPid(pid_t pid);
 
 static pid_t *CHILDREN = NULL; /* GLOBAL_X */
 static int MAX_FD = 2048; /* GLOBAL_X */ /* Max number of simultaneous pipes */
@@ -449,6 +450,7 @@ FILE *cf_popen_select(const char *command, const char *type, OutputSelect output
             if ((pp = fdopen(pd[0], type)) == NULL)
             {
                 cf_pwait(pid);
+                ClearAlarmedPid(pid);
                 ArgFree(argv);
                 return NULL;
             }
@@ -461,6 +463,7 @@ FILE *cf_popen_select(const char *command, const char *type, OutputSelect output
             if ((pp = fdopen(pd[1], type)) == NULL)
             {
                 cf_pwait(pid);
+                ClearAlarmedPid(pid);
                 ArgFree(argv);
                 return NULL;
             }
@@ -579,6 +582,7 @@ FILE *cf_popensetuid(const char *command, const Seq *arglist,
             if ((pp = fdopen(pd[0], type)) == NULL)
             {
                 cf_pwait(pid);
+                ClearAlarmedPid(pid);
                 ArgFree(argv);
                 return NULL;
             }
@@ -591,6 +595,7 @@ FILE *cf_popensetuid(const char *command, const Seq *arglist,
             if ((pp = fdopen(pd[1], type)) == NULL)
             {
                 cf_pwait(pid);
+                ClearAlarmedPid(pid);
                 ArgFree(argv);
                 return NULL;
             }
@@ -661,6 +666,7 @@ FILE *cf_popen_sh_select(const char *command, const char *type, OutputSelect out
             if ((pp = fdopen(pd[0], type)) == NULL)
             {
                 cf_pwait(pid);
+                ClearAlarmedPid(pid);
                 return NULL;
             }
             break;
@@ -672,6 +678,7 @@ FILE *cf_popen_sh_select(const char *command, const char *type, OutputSelect out
             if ((pp = fdopen(pd[1], type)) == NULL)
             {
                 cf_pwait(pid);
+                ClearAlarmedPid(pid);
                 return NULL;
             }
         }
@@ -780,6 +787,7 @@ FILE *cf_popen_shsetuid(const char *command, const char *type,
             if ((pp = fdopen(pd[0], type)) == NULL)
             {
                 cf_pwait(pid);
+                ClearAlarmedPid(pid);
                 return NULL;
             }
             break;
@@ -791,6 +799,7 @@ FILE *cf_popen_shsetuid(const char *command, const char *type,
             if ((pp = fdopen(pd[1], type)) == NULL)
             {
                 cf_pwait(pid);
+                ClearAlarmedPid(pid);
                 return NULL;
             }
         }
@@ -837,6 +846,31 @@ static int cf_pwait(pid_t pid)
     return retcode;
 }
 
+/* The pid the timeout alarm would signal stays registered until the child is
+ * actually reaped: cf_pwait() blocks with no bound of its own, and a command
+ * that closed its output but kept running is terminated by TimeOut() during
+ * exactly that wait. Deregistered only afterwards, with SIGALRM blocked so
+ * the handler cannot read the pid of an already-reaped -- and from then on
+ * recyclable -- process halfway through the clear.
+ *
+ * pthread_sigmask(), not sigprocmask(): this closer is reached from
+ * cf-serverd/cf-execd worker threads (DoExec2(), LocalExecThread()), and
+ * POSIX leaves sigprocmask()'s effect in a multithreaded process
+ * unspecified -- house style elsewhere in this tree (signal_lib.h,
+ * client_code.c) already uses pthread_sigmask() for exactly this reason. */
+static void ClearAlarmedPid(pid_t pid)
+{
+    sigset_t sigalrm, oldmask;
+    sigemptyset(&sigalrm);
+    sigaddset(&sigalrm, SIGALRM);
+    pthread_sigmask(SIG_BLOCK, &sigalrm, &oldmask);
+    if (ALARM_PID == pid)
+    {
+        ALARM_PID = -1;
+    }
+    pthread_sigmask(SIG_SETMASK, &oldmask, NULL);
+}
+
 /*******************************************************************/
 
 /**
@@ -872,8 +906,6 @@ int cf_pclose(FILE *pp)
         return -1;
     }
 
-    ALARM_PID = -1;
-
     if (fd >= MAX_FD)
     {
         ThreadUnlock(cft_count);
@@ -895,7 +927,9 @@ int cf_pclose(FILE *pp)
             GetErrorStr());
     }
 
-    return cf_pwait(pid);
+    int ret = cf_pwait(pid);
+    ClearAlarmedPid(pid);
+    return ret;
 }
 
 int cf_pclose_full_duplex_side(int fd)
@@ -960,7 +994,6 @@ int cf_pclose_full_duplex(IOData *data)
         return -1;
     }
 
-    ALARM_PID = -1;
     pid_t pid = 0;
 
     /* Safe as pipes[1] is -1 if not initialized */
@@ -1026,7 +1059,9 @@ int cf_pclose_full_duplex(IOData *data)
         return -1;
     }
 
-    return cf_pwait(pid);
+    int ret = cf_pwait(pid);
+    ClearAlarmedPid(pid);
+    return ret;
 }
 
 bool PipeToPid(pid_t *pid, FILE *pp)
