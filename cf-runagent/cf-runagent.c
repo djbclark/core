@@ -111,6 +111,7 @@ static const struct option OPTIONS[] =
     {"verbose", no_argument, 0, 'v'},
     {"log-level", required_argument, 0, 'g'},
     {"dry-run", no_argument, 0, 'n'},
+    {"no-lock", no_argument, 0, 'K'},
     {"version", no_argument, 0, 'V'},
     {"file", required_argument, 0, 'f'},
     {"define-class", required_argument, 0, 'D'},
@@ -138,6 +139,7 @@ static const char *const HINTS[] =
     "Output verbose information about the behaviour of cf-runagent",
     "Specify how detailed logs should be. Possible values: 'error', 'warning', 'notice', 'info', 'verbose', 'debug'",
     "All talk and no action mode - make no changes, only inform of promises not kept",
+    "Ignore locking constraints during execution (ifelapsed/expireafter) if \"too soon\" to run",
     "Output the version of the software",
     "Specify an alternative input file than the default. This option is overridden by FILE if supplied as argument.",
     "Define a list of comma separated classes to be sent to a remote agent",
@@ -326,7 +328,7 @@ static GenericAgentConfig *CheckOpts(int argc, char **argv)
     REMOTEBUNDLES[0] = '\0';
 
     int longopt_idx;
-    while ((c = getopt_long(argc, argv, "t:q:db::vnKhIif:g:D:VSxo:s:MH:C::l",
+    while ((c = getopt_long(argc, argv, "t:db::vnKhIif:g:D:Vxo:s:MH:C::l",
                             OPTIONS, &longopt_idx))
            != -1)
     {
@@ -650,7 +652,7 @@ static void KeepControlPromises(EvalContext *ctx, const Policy *policy)
 
             VarRef *ref = VarRefParseFromScope(cp->lval, "control_runagent");
             DataType value_type;
-            const void *value = EvalContextVariableGet(ctx, ref, &value_type);
+            const void *value = EvalContextVariableGetPlaintext(ctx, ref, &value_type);
             VarRefDestroy(ref);
 
             /* If var not found, or if it's an empty list. */

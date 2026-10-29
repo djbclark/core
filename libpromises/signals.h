@@ -36,6 +36,14 @@ void RequestReloadConfig(void);
 
 void MakeSignalPipe(void);
 int GetSignalPipe(void);
+
+/**
+ * Creates an AF_UNIX SOCK_STREAM socket pair with both ends set
+ * non-blocking, the way MakeSignalPipe() and cf-reactor's WakeupChannel
+ * both need. On failure, fds[0] and fds[1] are left at -1 and the cause is
+ * logged at LOG_LEVEL_ERR.
+ */
+bool MakeNonBlockingSocketPair(int fds[2]);
 void HandleSignalsForDaemon(int signum);
 void HandleSignalsForAgent(int signum);
 

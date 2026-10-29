@@ -954,6 +954,11 @@ AC_CHECK_DECLS(fgetgrent, [], [], [[#include <grp.h>]])
 
 AC_CHECK_DECLS(isfinite, [], [], [[#include <math.h>]])
 
+AC_CHECK_DECL([SCNd64], [],
+  [AC_MSG_ERROR(Cannot find SCNd64 in inttypes.h)],
+  [[#include <inttypes.h>]]
+  )
+
 AC_CHECK_FUNCS(getpwent setpwent endpwent)
 
 AC_CHECK_FUNCS(fgetspent lckpwdf ulckpwdf)
@@ -1708,9 +1713,9 @@ AS_IF([test "x$SYSTEMD_SERVICE_PATH" = "x"], [], [
     AC_CONFIG_FILES([misc/systemd/cf-apache.service])
     AC_CONFIG_FILES([misc/systemd/cf-execd.service])
     AC_CONFIG_FILES([misc/systemd/cf-hub.service])
-    AC_CONFIG_FILES([misc/systemd/cf-reactor.service])
     AC_CONFIG_FILES([misc/systemd/cf-monitord.service])
     AC_CONFIG_FILES([misc/systemd/cf-postgres.service])
+    AC_CONFIG_FILES([misc/systemd/cf-reactor.service])
     AC_CONFIG_FILES([misc/systemd/cf-serverd.service])
 ])
 
@@ -2014,7 +2019,7 @@ AC_CONFIG_FILES([Makefile
     cf-testd/Makefile
     cf-net/Makefile
     cf-secret/Makefile
-    cf-watchd/Makefile
+    cf-reactor/Makefile
     config.post.h
     contrib/vagrant-ci/centos-9s-x64/Makefile
     misc/Makefile
@@ -2028,7 +2033,8 @@ AC_CONFIG_FILES([Makefile
     tests/unit/Makefile
     tests/load/Makefile
     tests/static-check/Makefile
-    tests/valgrind-check/Makefile])
+    tests/valgrind-check/Makefile
+    tests/asan-check/Makefile])
 
 # Run autoconf/configure in libutils, generating necessary makefiles:
 AC_CONFIG_SUBDIRS([libntech])

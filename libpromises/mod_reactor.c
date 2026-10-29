@@ -22,7 +22,7 @@
   included file COSL.txt.
 */
 
-#include <mod_watch.h>
+#include <mod_reactor.h>
 
 #include <syntax.h>
 
@@ -31,7 +31,7 @@ static const ConstraintSyntax when_constraints[] =
     CONSTRAINT_SYNTAX_GLOBAL,
 
     /* Row models */
-    ConstraintSyntaxNewStringList("files_deleted", CF_ANYSTRING, "List of files to watch for deletion", SYNTAX_STATUS_NORMAL),
+    ConstraintSyntaxNewString("file_deleted", CF_ANYSTRING, "File to react for on deletion", SYNTAX_STATUS_NORMAL),
     ConstraintSyntaxNewNull()
 };
 
@@ -39,13 +39,13 @@ static const BodySyntax when_body = BodySyntaxNew("when", when_constraints, NULL
 
 static const ConstraintSyntax CF_EVENT_BODIES[] =
 {
-    ConstraintSyntaxNewBody("when", &when_body, "Event to watch", SYNTAX_STATUS_NORMAL),
+    ConstraintSyntaxNewBody("when", &when_body, "Event to react to", SYNTAX_STATUS_NORMAL),
     ConstraintSyntaxNewBundle("then", "Bundle to run on event", SYNTAX_STATUS_NORMAL),
     ConstraintSyntaxNewNull()
 };
 
-const PromiseTypeSyntax CF_WATCH_PROMISE_TYPES[] =
+const PromiseTypeSyntax CF_REACTOR_PROMISE_TYPES[] =
 {
-    PromiseTypeSyntaxNew("watch", "events", CF_EVENT_BODIES, NULL, SYNTAX_STATUS_NORMAL),
+    PromiseTypeSyntaxNew("reactor", "events", CF_EVENT_BODIES, NULL, SYNTAX_STATUS_NORMAL),
     PromiseTypeSyntaxNewNull()
 };

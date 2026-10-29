@@ -84,7 +84,6 @@ libpromises_la_SOURCES = \
 	dbm_api.c dbm_api.h dbm_api_types.h dbm_priv.h \
 	dbm_migration.c dbm_migration.h \
 	dbm_migration_lastseen.c \
-	dbm_migration_observations.c \
 	dbm_lmdb.c \
 	dbm_quick.c \
 	dbm_tokyocab.c \
@@ -135,7 +134,7 @@ libpromises_la_SOURCES = \
 	mod_storage.c mod_storage.h \
 	mod_knowledge.c mod_knowledge.h \
 	mod_users.c mod_users.h \
-	mod_watch.c mod_watch.h \
+	mod_reactor.c mod_reactor.h \
 	modes.c \
 	monitoring_read.c monitoring_read.h \
 	ornaments.c ornaments.h \
@@ -207,13 +206,20 @@ libpromises_la_SOURCES += \
 	process_freebsd.c
 endif
 
+if MACOSX
+libpromises_la_SOURCES += \
+	process_macos.c
+endif
+
 if !LINUX
 if !AIX
 if !HPUX
 if !SOLARIS
 if !FREEBSD
+if !MACOSX
 libpromises_la_SOURCES += \
 	process_unix_stub.c
+endif
 endif
 endif
 endif

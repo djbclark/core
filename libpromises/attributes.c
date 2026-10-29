@@ -563,7 +563,7 @@ FileSelect GetSelectConstraints(const EvalContext *ctx, const Promise *pp)
         entries++;
     }
 
-    if (!IntegerRangeFromString(value, (long *) &s.min_size, (long *) &s.max_size))
+    if (!IntegerRangeFromString(value, &s.min_size, &s.max_size))
     {
         PromiseRef(LOG_LEVEL_ERR, pp);
         FatalError(ctx, "Could not make sense of integer range [%s]", value);
@@ -576,7 +576,7 @@ FileSelect GetSelectConstraints(const EvalContext *ctx, const Promise *pp)
         entries++;
     }
 
-    if (!IntegerRangeFromString(value, (long *) &s.min_ctime, (long *) &s.max_ctime))
+    if (!TimeRangeFromString(value, &s.min_ctime, &s.max_ctime))
     {
         PromiseRef(LOG_LEVEL_ERR, pp);
         FatalError(ctx, "Could not make sense of integer range [%s]", value);
@@ -589,7 +589,7 @@ FileSelect GetSelectConstraints(const EvalContext *ctx, const Promise *pp)
         entries++;
     }
 
-    if (!IntegerRangeFromString(value, (long *) &s.min_atime, (long *) &s.max_atime))
+    if (!TimeRangeFromString(value, &s.min_atime, &s.max_atime))
     {
         PromiseRef(LOG_LEVEL_ERR, pp);
         FatalError(ctx, "Could not make sense of integer range [%s]", value);
@@ -602,7 +602,7 @@ FileSelect GetSelectConstraints(const EvalContext *ctx, const Promise *pp)
         entries++;
     }
 
-    if (!IntegerRangeFromString(value, (long *) &s.min_mtime, (long *) &s.max_mtime))
+    if (!TimeRangeFromString(value, &s.min_mtime, &s.max_mtime))
     {
         PromiseRef(LOG_LEVEL_ERR, pp);
         FatalError(ctx, "Could not make sense of integer range [%s]", value);
@@ -891,6 +891,42 @@ ENTERPRISE_FUNC_0ARG_DEFINE_STUB(HashMethod, GetBestFileChangeHashMethod)
     return HASH_METHOD_SHA512;
 }
 
+/* Keep in sync with CF_CHANGE_SILENCE_RANGE in cf3.defs.h, which is what
+ * rejects unknown category names during policy validation. */
+static const struct
+{
+    const char *name;
+    FileChangeSilence categories;
+} FILE_CHANGE_SILENCE_CATEGORIES[] = {
+    { "content", FILE_CHANGE_SILENCE_CONTENT },
+    { "add",     FILE_CHANGE_SILENCE_ADD     },
+    { "remove",  FILE_CHANGE_SILENCE_REMOVE  },
+    { "owner",   FILE_CHANGE_SILENCE_OWNER   },
+    { "group",   FILE_CHANGE_SILENCE_GROUP   },
+    { "perms",   FILE_CHANGE_SILENCE_PERMS   },
+    { "device",  FILE_CHANGE_SILENCE_DEVICE  },
+    { "mtime",   FILE_CHANGE_SILENCE_MTIME   },
+    { "inode",   FILE_CHANGE_SILENCE_INODE   },
+    { "stats",   FILE_CHANGE_SILENCE_STATS   },
+    { "all",     FILE_CHANGE_SILENCE_ALL     },
+};
+
+static FileChangeSilence FileChangeSilenceFromString(const char *s)
+{
+    assert(s != NULL);
+
+    for (size_t i = 0;
+         i < sizeof(FILE_CHANGE_SILENCE_CATEGORIES) / sizeof(FILE_CHANGE_SILENCE_CATEGORIES[0]);
+         i++)
+    {
+        if (StringEqual(s, FILE_CHANGE_SILENCE_CATEGORIES[i].name))
+        {
+            return FILE_CHANGE_SILENCE_CATEGORIES[i].categories;
+        }
+    }
+    return FILE_CHANGE_SILENCE_NONE;
+}
+
 FileChange GetChangeMgtConstraints(const EvalContext *ctx, const Promise *pp)
 {
     FileChange c;
@@ -950,6 +986,25 @@ FileChange GetChangeMgtConstraints(const EvalContext *ctx, const Promise *pp)
     else
     {
         c.report_changes = FILE_CHANGE_REPORT_NONE;
+    }
+
+    c.silence = FILE_CHANGE_SILENCE_NONE;
+
+    for (const Rlist *rp = PromiseGetConstraintAsList(ctx, "silence", pp);
+         rp != NULL; rp = rp->next)
+    {
+        const char *cat = RlistScalarValue(rp);
+        FileChangeSilence flag = FileChangeSilenceFromString(cat);
+        if (flag != FILE_CHANGE_SILENCE_NONE)
+        {
+            c.silence |= flag;
+        }
+        else
+        {
+            Log(LOG_LEVEL_WARNING,
+                "Unknown 'silence' category '%s' in changes body", cat);
+            PromiseRef(LOG_LEVEL_WARNING, pp);
+        }
     }
 
     if (PromiseGetConstraintAsRval(pp, "update_hashes", RVAL_TYPE_SCALAR))
@@ -1138,6 +1193,8 @@ EditDefaults GetEditDefaults(const EvalContext *ctx, const Promise *pp)
 
 ContextConstraint GetContextConstraints(const EvalContext *ctx, const Promise *pp)
 {
+    assert(pp != NULL);
+
     ContextConstraint a;
 
     a.nconstraints = 0;
@@ -1410,7 +1467,7 @@ ProcessSelect GetProcessFilterConstraints(const EvalContext *ctx, const Promise 
 
     // get constraint cumulated CPU time
     value = PromiseGetConstraintAsRval(pp, "ttime_range", RVAL_TYPE_SCALAR);
-    if (!IntegerRangeFromString(value, (long *) &p.min_ttime, (long *) &p.max_ttime))
+    if (!TimeRangeFromString(value, &p.min_ttime, &p.max_ttime))
     {
         PromiseRef(LOG_LEVEL_ERR, pp);
         FatalError(ctx, "Could not make sense of integer range [%s]", value);
@@ -1418,7 +1475,7 @@ ProcessSelect GetProcessFilterConstraints(const EvalContext *ctx, const Promise 
 
     // get constraint start time
     value = PromiseGetConstraintAsRval(pp, "stime_range", RVAL_TYPE_SCALAR);
-    if (!IntegerRangeFromString(value, (long *) &p.min_stime, (long *) &p.max_stime))
+    if (!TimeRangeFromString(value, &p.min_stime, &p.max_stime))
     {
         PromiseRef(LOG_LEVEL_ERR, pp);
         FatalError(ctx, "Could not make sense of integer range [%s]", value);

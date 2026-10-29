@@ -1,5 +1,5 @@
 #
-#  Copyright 2021 Northern.tech AS
+#  Copyright 2026 Northern.tech AS
 #
 #  This file is part of CFEngine 3 - written and maintained by Northern.tech AS.
 #
@@ -21,7 +21,7 @@
 # (COSL) may apply to this file if you as a licensee so wish it. See
 # included file COSL.txt.
 #
-noinst_LTLIBRARIES = libcf-watchd.la
+noinst_LTLIBRARIES = libcf-reactor.la
 
 AM_CPPFLAGS = -I$(srcdir)/../libpromises -I$(srcdir)/../libntech/libutils \
 	-I$(srcdir)/../libcfecompat \
@@ -35,14 +35,21 @@ AM_CFLAGS = $(CF3_CFLAGS) \
 	$(OPENSSL_CFLAGS) \
 	$(ENTERPRISE_CFLAGS)
 
-libcf_watchd_la_LIBADD = ../libpromises/libpromises.la
+libcf_reactor_la_LIBADD = ../libpromises/libpromises.la
 
-libcf_watchd_la_SOURCES = cf-watchd.c
+libcf_reactor_la_SOURCES = \
+	cf-reactor.c \
+	file_watcher.c file_watcher.h \
+	reactor_context.c reactor_context.h \
+	reactor_transform.c reactor_transform.h \
+	stoppable_thread.c stoppable_thread.h \
+	wakeup_channel.c wakeup_channel.h \
+	watcher.c watcher.h
 
 if !BUILTIN_EXTENSIONS
- bin_PROGRAMS = cf-watchd
- cf_watchd_LDADD = libcf-watchd.la
- cf_watchd_SOURCES =
+ bin_PROGRAMS = cf-reactor
+ cf_reactor_LDADD = libcf-reactor.la
+ cf_reactor_SOURCES =
 endif
 
 CLEANFILES = *.gcno *.gcda

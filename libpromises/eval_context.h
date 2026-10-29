@@ -223,9 +223,11 @@ bool EvalContextVariablePutSpecialTagsSetWithComment(EvalContext *ctx, SpecialSc
                                                      const char *lval, const void *value,
                                                      DataType type, StringSet *tags,
                                                      const char *comment);
-const void *EvalContextVariableGetSpecial(const EvalContext *ctx, const SpecialScope scope, const char *varname, DataType *type_out);
-const char *EvalContextVariableGetSpecialString(const EvalContext *ctx, const SpecialScope scope, const char *varname);
-const void *EvalContextVariableGet(const EvalContext *ctx, const VarRef *ref, DataType *type_out);
+const void *EvalContextVariableGet(const EvalContext *ctx, const VarRef *ref, DataType *type_out, bool get_secret);
+const void *EvalContextVariableGetPlaintext(const EvalContext *ctx, const VarRef *ref, DataType *type_out);
+const void *EvalContextVariableGetSpecial(const EvalContext *ctx, const SpecialScope scope, const char *varname, DataType *type_out, bool get_secret);
+const char *EvalContextVariableGetSpecialString(const EvalContext *ctx, const SpecialScope scope, const char *varname, bool get_secret);
+const void *EvalContextVariableGetSpecialPlaintext(const EvalContext *ctx, const SpecialScope scope, const char *varname, DataType *type_out);
 const Promise *EvalContextVariablePromiseGet(const EvalContext *ctx, const VarRef *ref);
 bool EvalContextVariableRemoveSpecial(const EvalContext *ctx, SpecialScope scope, const char *lval);
 bool EvalContextVariableRemove(const EvalContext *ctx, const VarRef *ref);
@@ -331,6 +333,13 @@ void cfPS(EvalContext *ctx, LogLevel level, PromiseResult status, const Promise 
  * multiple changes done by the given promise.
  */
 void RecordChange(EvalContext *ctx, const Promise *pp, const Attributes *attr, const char *fmt, ...) FUNC_ATTR_PRINTF(4, 5);
+
+/**
+ * va_list variant of RecordChange(), for callers that wrap it in their own
+ * variadic function.
+ */
+void VRecordChange(EvalContext *ctx, const Promise *pp, const Attributes *attr, const char *fmt, va_list ap);
+
 void RecordNoChange(EvalContext *ctx, const Promise *pp, const Attributes *attr, const char *fmt, ...) FUNC_ATTR_PRINTF(4, 5);
 void RecordFailure(EvalContext *ctx, const Promise *pp, const Attributes *attr, const char *fmt, ...) FUNC_ATTR_PRINTF(4, 5);
 void RecordWarning(EvalContext *ctx, const Promise *pp, const Attributes *attr, const char *fmt, ...) FUNC_ATTR_PRINTF(4, 5);

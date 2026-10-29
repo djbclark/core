@@ -397,7 +397,7 @@ SyntaxTypeMatch CheckConstraintTypeMatch(const char *lval, Rval rval, DataType d
 
         /* Fn-like objects are assumed to be parameterized bundles in these... */
 
-        checklist = SplitString("bundlesequence,edit_line,edit_xml,usebundle,service_bundle,home_bundle", ',');
+        checklist = SplitString("bundlesequence,edit_line,edit_xml,usebundle,service_bundle,home_bundle,then", ',');
 
         if (!IsItemIn(checklist, lval))
         {
@@ -488,7 +488,7 @@ vars:
             if (!IsExpandable(BufferData(inner_value)))
             {
                 VarRef *ref = VarRefParse(BufferData(inner_value));
-                EvalContextVariableGet(ctx, ref, &dtype);
+                EvalContextVariableGetPlaintext(ctx, ref, &dtype);
                 VarRefDestroy(ref);
 
                 if (DataTypeToRvalType(dtype) == RVAL_TYPE_LIST)

@@ -249,7 +249,7 @@ static JsonElement* VarRefValueToJson(const EvalContext *ctx, const FnCall *fp, 
     assert(ref);
 
     DataType value_type = CF_DATA_TYPE_NONE;
-    const void *value = EvalContextVariableGet(ctx, ref, &value_type);
+    const void *value = EvalContextVariableGetPlaintext(ctx, ref, &value_type);
     bool want_type = true;
 
     // Convenience storage for the name of the function, since fp can be NULL
@@ -2327,7 +2327,7 @@ static FnCallResult FnCallBundlesMatching(EvalContext *ctx, const Policy *policy
             VarRef *ref = VarRefParseFromBundle("tags", bp);
             VarRefSetMeta(ref, true);
             DataType type;
-            const void *bundle_tags = EvalContextVariableGet(ctx, ref, &type);
+            const void *bundle_tags = EvalContextVariableGetPlaintext(ctx, ref, &type);
             VarRefDestroy(ref);
 
             bool found = false; // case where tag_args are given and the bundle has no tags
@@ -3695,7 +3695,7 @@ static FnCallResult FnCallGetIndices(EvalContext *ctx, ARG_UNUSED const Policy *
     {
         VarRef *ref = ResolveAndQualifyVarName(fp, name_str);
         DataType type;
-        EvalContextVariableGet(ctx, ref, &type);
+        EvalContextVariableGetPlaintext(ctx, ref, &type);
 
         /* A variable holding a data container. */
         if (DataTypeToRvalType(type) == RVAL_TYPE_CONTAINER || DataTypeToRvalType(type) == RVAL_TYPE_LIST)
@@ -4852,7 +4852,7 @@ static FnCallResult FnCallSelectServers(EvalContext *ctx,
 
     VarRef *ref = VarRefParse(naked);
     DataType value_type;
-    const Rlist *hostnameip = EvalContextVariableGet(ctx, ref, &value_type);
+    const Rlist *hostnameip = EvalContextVariableGetPlaintext(ctx, ref, &value_type);
     if (value_type == CF_DATA_TYPE_NONE)
     {
         Log(LOG_LEVEL_VERBOSE,
@@ -5933,7 +5933,7 @@ static char *DataTypeStringFromVarName(EvalContext *ctx, const char *var_name, b
 
     VarRef *const var_ref = VarRefParse(var_name);
     DataType type;
-    const void *value = EvalContextVariableGet(ctx, var_ref, &type);
+    const void *value = EvalContextVariableGetPlaintext(ctx, var_ref, &type);
     VarRefDestroy(var_ref);
 
     const char *const type_str =
@@ -6229,7 +6229,7 @@ static bool CanFormatAsStringList(EvalContext *ctx, const Rlist *arg, const Rlis
     const char* const varname = RlistScalarValue(arg);
     VarRef *ref = VarRefParse(varname);
     DataType type;
-    *out = EvalContextVariableGet(ctx, ref, &type);
+    *out = EvalContextVariableGetPlaintext(ctx, ref, &type);
     VarRefDestroy(ref);
 
     return type == CF_DATA_TYPE_STRING_LIST;
@@ -6615,7 +6615,7 @@ static FnCallResult FnCallIsVariable(EvalContext *ctx, ARG_UNUSED const Policy *
     {
         VarRef *ref = VarRefParse(lval);
         DataType value_type;
-        EvalContextVariableGet(ctx, ref, &value_type);
+        EvalContextVariableGetPlaintext(ctx, ref, &value_type);
         if (value_type != CF_DATA_TYPE_NONE)
         {
             found = true;
@@ -7593,6 +7593,147 @@ static FnCallResult FnCallStrftime(ARG_UNUSED EvalContext *ctx,
     }
 
     return FnFailure();
+}
+
+/*********************************************************************/
+
+static int ParseDate(const char *input_string, time_t *out)
+{
+    char date_path[PATH_MAX];
+    strncpy(date_path, GetBinDir(), sizeof(date_path) - 1);
+    JoinPaths(date_path, sizeof(date_path), "date");
+
+    char buffer[CF_BUFSIZE];
+    int n = snprintf(buffer, sizeof(buffer), "%s --date '%s' +%%s", date_path, input_string);
+
+    if (n < 0 || (size_t) n >= sizeof(buffer)) {
+        Log(LOG_LEVEL_ERR, "Truncation error: input string '%.10s...' is too long (%d >= %zu)",
+            input_string, n, sizeof(buffer));
+        return -1;
+    }
+
+    FILE *fd = cf_popen(buffer, "r", true);
+    if (fd == NULL)
+    {
+        Log(LOG_LEVEL_ERR, "Couldn't run command: '%s'", buffer);
+        return -1;
+    }
+
+    size_t bytes_read = fread(buffer, 1, sizeof(buffer) - 1 , fd);
+    buffer[bytes_read] = '\0';
+
+    if (bytes_read == 0)
+    {
+        if (ferror(fd))
+        {
+            Log(LOG_LEVEL_ERR, "Error reading output for '%s'", input_string);
+        }
+        else if (feof(fd))
+        {
+            Log(LOG_LEVEL_DEBUG, "No output read for '%s'", input_string);
+        }
+        fclose(fd);
+        return -1;
+    }
+    fclose(fd);
+
+    long time_value;
+    int ret = StringToLong(buffer, &time_value);
+    if (ret != 0)
+    {
+        LogStringToLongError(buffer, "ParseDate", ret);
+        return -1;
+    }
+
+    *out = (time_t) time_value;
+    if ((long) *out != time_value)
+    {
+        Log(LOG_LEVEL_ERR, "Date value '%ld' does not fit in time_t", time_value);
+        return -1;
+    }
+
+    return 0;
+}
+
+static FnCallResult FnCallStrToTime(ARG_UNUSED EvalContext *ctx, ARG_UNUSED const Policy *policy, const FnCall *fp, const Rlist *finalargs)
+{
+    assert(fp != NULL);
+
+    const char *input_string = RlistScalarValue(finalargs);
+    time_t result;
+    int ret = ParseDate(input_string, &result);
+
+    if (ret != 0)
+    {
+        Log(LOG_LEVEL_ERR, "'%s': Invalid date '%s'", fp->name, input_string);
+        return FnFailure();
+    }
+
+    return FnReturnF("%ld", result);
+}
+
+/*********************************************************************/
+
+static FnCallResult FnCallFileOlderThan(ARG_UNUSED EvalContext *ctx, ARG_UNUSED const Policy *policy, const FnCall *fp, const Rlist *finalargs)
+{
+    assert(fp != NULL);
+
+    if (finalargs == NULL)
+    {
+        Log(LOG_LEVEL_ERR, "Function '%s' requires path as first argument",
+            fp->name);
+        return FnFailure();
+    }
+    const char *filename = RlistScalarValue(finalargs);
+
+    if (finalargs->next == NULL)
+    {
+        Log(LOG_LEVEL_ERR, "Function '%s' requires date or date offset as second argument",
+            fp->name);
+        return FnFailure();
+    }
+    const char *date = RlistScalarValue(finalargs->next);
+    const char *option = (finalargs->next->next != NULL) ? RlistScalarValue(finalargs->next->next) : "modify";
+
+    struct stat statbuf;
+
+    if (lstat(filename, &statbuf) != 0)
+    {
+        return FnFailure();
+    }
+
+    time_t file_ts;
+
+    if (StringEqual_IgnoreCase(option, "modify"))
+    {
+        file_ts = statbuf.st_mtime;
+    }
+    else if (StringEqual_IgnoreCase(option, "access"))
+    {
+        file_ts = statbuf.st_atime;
+    }
+    else if (StringEqual_IgnoreCase(option, "change"))
+    {
+        file_ts = statbuf.st_ctime;
+    }
+    else
+    {
+        ProgrammingError("Unknown option for %s\n", fp->name);
+    }
+
+    time_t input_time;
+    int ret = ParseDate(date, &input_time);
+
+    if (ret != 0)
+    {
+        Log(LOG_LEVEL_ERR, "'%s': Couldn't parse '%s'", fp->name, date);
+        return FnFailure();
+    }
+
+    time_t now = time(NULL);
+    time_t offset = input_time - now; // convert date to an offset
+
+    return FnReturnContext((file_ts + offset) < now);
 }
 
 /*********************************************************************/
@@ -11427,6 +11568,12 @@ static const FnCallArg STRFTIME_ARGS[] =
     {NULL, CF_DATA_TYPE_NONE, NULL}
 };
 
+static const FnCallArg STRTOTIME_ARGS[] =
+{
+    {CF_ANYSTRING, CF_DATA_TYPE_STRING, "String to parse"},
+    {NULL, CF_DATA_TYPE_NONE, NULL}
+};
+
 static const FnCallArg STRING_REPLACE_ARGS[] =
 {
     {CF_ANYSTRING, CF_DATA_TYPE_STRING, "Source string"},
@@ -11652,6 +11799,14 @@ static const FnCallArg ISREADABLE_ARGS[] =
 {
     {CF_ABSPATHRANGE, CF_DATA_TYPE_STRING, "Path to file"},
     {CF_VALRANGE, CF_DATA_TYPE_INT, "Timeout interval"},
+    {NULL, CF_DATA_TYPE_NONE, NULL}
+};
+
+static const FnCallArg FILE_OLDER_THAN_ARGS[] =
+{
+    {CF_ABSPATHRANGE, CF_DATA_TYPE_STRING, "Path to file"},
+    {CF_ANYSTRING, CF_DATA_TYPE_STRING, "Date string"},
+    {"modify,access,change", CF_DATA_TYPE_OPTION, "file timespec"},
     {NULL, CF_DATA_TYPE_NONE, NULL}
 };
 
@@ -12003,6 +12158,8 @@ const FnCallType CF_FNCALL_TYPES[] =
                   FNCALL_OPTION_NONE, FNCALL_CATEGORY_DATA, SYNTAX_STATUS_NORMAL, DEFAULT_ARGC),
     FnCallTypeNew("strftime", CF_DATA_TYPE_STRING, STRFTIME_ARGS, &FnCallStrftime, "Format a date and time string",
                   FNCALL_OPTION_NONE, FNCALL_CATEGORY_DATA, SYNTAX_STATUS_NORMAL, DEFAULT_ARGC),
+    FnCallTypeNew("strtotime", CF_DATA_TYPE_INT, STRTOTIME_ARGS, &FnCallStrToTime, "Parse a timestamp from a string",
+                  FNCALL_OPTION_NONE, FNCALL_CATEGORY_DATA, SYNTAX_STATUS_NORMAL, DEFAULT_ARGC),
     FnCallTypeNew("sublist", CF_DATA_TYPE_STRING_LIST, SUBLIST_ARGS, &FnCallSublist, "Returns arg3 element from either the head or the tail (according to arg2) of list or array or data container arg1.",
                   FNCALL_OPTION_COLLECTING, FNCALL_CATEGORY_DATA, SYNTAX_STATUS_NORMAL, DEFAULT_ARGC),
     FnCallTypeNew("sysctlvalue", CF_DATA_TYPE_STRING, SYSCTLVALUE_ARGS, &FnCallSysctlValue, "Returns a value for sysctl key arg1 pair",
@@ -12103,6 +12260,9 @@ const FnCallType CF_FNCALL_TYPES[] =
                   FNCALL_OPTION_VARARG, FNCALL_CATEGORY_FILES, SYNTAX_STATUS_NORMAL, ARGC(2, 3)),
     FnCallTypeNew("isreadable", CF_DATA_TYPE_CONTEXT, ISREADABLE_ARGS, &FnCallIsReadable, "Check if file is readable. Timeout immediately or after optional timeout interval",
                   FNCALL_OPTION_VARARG, FNCALL_CATEGORY_FILES, SYNTAX_STATUS_NORMAL, ARGC(1, 2)),
+    FnCallTypeNew("file_older_than", CF_DATA_TYPE_CONTEXT, FILE_OLDER_THAN_ARGS, &FnCallFileOlderThan, "Check if file is older than a time offset or date.",
+                  FNCALL_OPTION_VARARG, FNCALL_CATEGORY_FILES, SYNTAX_STATUS_NORMAL, ARGC(2, 3)),
+
 
     // Datatype functions
     FnCallTypeNew("type", CF_DATA_TYPE_STRING, DATATYPE_ARGS, &FnCallDatatype, "Get type description as string",

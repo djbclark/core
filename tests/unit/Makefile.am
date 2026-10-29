@@ -37,6 +37,7 @@ AM_CPPFLAGS = $(CORE_CPPFLAGS) \
 	-I$(srcdir)/../../cf-execd \
 	-I$(srcdir)/../../cf-key \
 	-I$(srcdir)/../../cf-check \
+	-I$(srcdir)/../../cf-reactor \
 	-DTESTDATADIR='"$(srcdir)/data"'
 
 LDADD = ../../libpromises/libpromises.la libtest.la
@@ -68,7 +69,6 @@ libdb_la_SOURCES = db_stubs.c \
 	../../libpromises/dbm_lmdb.c \
 	../../libpromises/dbm_migration.c \
 	../../libpromises/dbm_migration_lastseen.c \
-	../../libpromises/dbm_migration_observations.c \
 	../../libpromises/global_mutex.c \
 	../../cf-check/backup.c \
 	../../cf-check/diagnose.c \
@@ -104,7 +104,8 @@ check_PROGRAMS = \
 	lastseen_test \
 	lastseen_migration_test \
 	changes_migration_test \
-	observations_migration_test \
+	observations_storage_test \
+	observables_names_test \
 	db_test \
 	db_concurrent_test \
 	item_lib_test \
@@ -138,6 +139,7 @@ check_PROGRAMS = \
 	variable_test \
 	verify_databases_test \
 	files_properties_test \
+	simulate_mode_test \
 	protocol_test \
 	mon_cpu_test \
 	mon_load_test \
@@ -153,7 +155,10 @@ check_PROGRAMS = \
 	split_process_line_test \
 	new_packages_promise_test \
 	iteration_test \
-	protocol_recv_overflow_test
+	protocol_recv_overflow_test \
+	watcher_test \
+	stoppable_thread_test \
+	wakeup_channel_test
 
 if HAVE_AVAHI_CLIENT
 if HAVE_AVAHI_COMMON
@@ -183,9 +188,10 @@ TESTS = $(check_PROGRAMS) $(check_SCRIPTS)
 
 if MACOSX
 XFAIL_TESTS = set_domainname_test
-XFAIL_TESTS += process_test
-XFAIL_TESTS += mon_processes_test
 XFAIL_TESTS += rlist_test
+# NOTE: cf-monitord's own process-table gathering has a separate, real bug on
+# macOS
+XFAIL_TESTS += mon_processes_test
 endif
 
 if AIX
@@ -223,6 +229,18 @@ set_domainname_test_SOURCES = set_domainname_test.c
 set_domainname_test_LDADD = libtest.la ../../libpromises/libpromises.la
 
 regex_test_SOURCES = regex_test.c ../../libpromises/match_scope.c
+
+watcher_test_SOURCES = watcher_test.c \
+	../../cf-reactor/watcher.c \
+	../../cf-reactor/file_watcher.c \
+	../../cf-reactor/stoppable_thread.c \
+	../../cf-reactor/wakeup_channel.c
+
+stoppable_thread_test_SOURCES = stoppable_thread_test.c \
+	../../cf-reactor/stoppable_thread.c
+
+wakeup_channel_test_SOURCES = wakeup_channel_test.c \
+	../../cf-reactor/wakeup_channel.c
 
 protocol_test_SOURCES = protocol_test.c \
 	../../cf-serverd/server_common.c \
@@ -263,8 +281,11 @@ db_concurrent_test_SOURCES = db_concurrent_test.c
 #db_concurrent_test_CPPFLAGS = $(libdb_la_CPPFLAGS)
 db_concurrent_test_LDADD = libtest.la libdb.la
 
-observations_migration_test_SOURCES = observations_migration_test.c
-observations_migration_test_LDADD = libtest.la libdb.la
+observations_storage_test_SOURCES = observations_storage_test.c
+observations_storage_test_LDADD = libtest.la ../../libpromises/libpromises.la
+
+observables_names_test_SOURCES = observables_names_test.c \
+	../../cf-check/observables.c
 
 lastseen_test_SOURCES = lastseen_test.c \
 	../../libntech/libutils/statistics.c
@@ -398,6 +419,8 @@ strlist_test_SOURCES = strlist_test.c \
 verify_databases_test_LDADD = ../../cf-agent/libcf-agent.la libtest.la
 
 files_properties_test_LDADD = ../../cf-agent/libcf-agent.la libtest.la
+
+simulate_mode_test_LDADD = ../../cf-agent/libcf-agent.la libtest.la
 
 iteration_test_SOURCES = iteration_test.c
 

@@ -45,7 +45,7 @@ SUBDIRS = \
 	cf-upgrade \
 	cf-net \
 	cf-secret \
-	cf-watchd \
+	cf-reactor \
 	misc \
 	python \
 	ext \

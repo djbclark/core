@@ -22,11 +22,14 @@
   included file COSL.txt.
 */
 
-#ifndef CFENGINE_MOD_WATCH_H
-#define CFENGINE_MOD_WATCH_H
+#ifndef CFENGINE_FILE_WATCHER_H
+#define CFENGINE_FILE_WATCHER_H
 
-#include <cf3.defs.h>
+#include <platform.h>
 
-extern const PromiseTypeSyntax CF_WATCH_PROMISE_TYPES[];
+
+void *FileWatcherStateNew(const char *path);
+bool CheckFileDeleted(void *state);
+void DestroyFileWatcherState(void *state);
 
 #endif
