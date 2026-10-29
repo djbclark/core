@@ -5,6 +5,10 @@ on:
   # this includes opening and pushing more commits
   pull_request:
     branches: [ master, 3.27.x, 3.24.x ]
+  # throwaway: tendcf-integration conflicts with the fast-forwarded master, so
+  # the pull_request merge commit does not exist; run on the head commit.
+  push:
+    branches: [ ci/tendcf-integration-check ]
 
 jobs:
   cfengine_cli:
