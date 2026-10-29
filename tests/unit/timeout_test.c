@@ -120,12 +120,15 @@ static void test_clear_preserves_a_true_signalled_flag(void)
  * cf_popen()'s fork actually publishing the child's pid into ALARM_PID, and
  * under load the 2 second alarm can fire inside that window -- observed
  * directly under a parallel `make check`, not theoretical. That race is
- * real but is not what this test pins; forking first and registering the
- * already-known pid, the same way test_clear_preserves_a_true_signalled_flag
+ * real but is not what this test pins (CFE-4734 closes it by starting the
+ * clock only once cf_popen() has the pid); forking first and registering
+ * the already-known pid, the same way test_clear_preserves_a_true_signalled_flag
  * does above, removes it from this test so a flake there cannot masquerade
- * as a regression here. The payload chains through exec so the timed
- * process is the pid cf_popen_sh() returned, with no intermediate shell
- * left to hold the pipe open once it is killed. */
+ * as a regression here. Because the fork already happened, the clock has to
+ * be started by hand, in cf_popen()'s order: publish the pid, then start.
+ * The payload chains through exec so the timed process is the pid
+ * cf_popen_sh() returned, with no intermediate shell left to hold the pipe
+ * open once it is killed. */
 static void test_pclose_leaves_the_alarm_its_process(void)
 {
     FILE *pfp = cf_popen_sh("exec 1>&- 2>&-; exec sleep 30", "r");
@@ -135,6 +138,7 @@ static void test_pclose_leaves_the_alarm_its_process(void)
 
     SetTimeOut(2);
     ALARM_PID = child;
+    StartTimeOutClock();
     time_t start = time(NULL);
 
     char buf[64];
