@@ -55,16 +55,17 @@ bundle agent test
       comment => "Drives /bin/sh with a POSIX shell payload";
 
   commands:
-    "/bin/sh"
-      arglist => { "-c", "touch $(G.testdir)/oc_start" };
+    "/bin/sh" arglist => { "-c", "touch $(G.testdir)/oc_start" };
 
     "/bin/sh"
-      arglist => { "-c", "exec 1>&- 2>&-; sleep 30; touch $(G.testdir)/oc_completed; exit 0" },
+      arglist => {
+        "-c",
+        "exec 1>&- 2>&-; sleep 30; touch $(G.testdir)/oc_completed; exit 0",
+      },
       contain => exec_timeout_2,
       classes => dcs_all_classes("output_closed");
 
-    "/bin/sh"
-      arglist => { "-c", "touch $(G.testdir)/oc_end" };
+    "/bin/sh" arglist => { "-c", "touch $(G.testdir)/oc_end" };
 }
 
 body contain exec_timeout_2
@@ -87,7 +88,7 @@ bundle agent check
       and => {
         fileexists("$(G.testdir)/oc_start"),
         fileexists("$(G.testdir)/oc_end"),
-        islessthan("$(elapsed)", "25")
+        islessthan("$(elapsed)", "25"),
       },
       scope => "namespace";
 
