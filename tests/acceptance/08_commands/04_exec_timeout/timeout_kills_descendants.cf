@@ -44,8 +44,7 @@ bundle agent test
       comment => "Drives /bin/sh with POSIX shell payloads";
 
   commands:
-    "/bin/sh"
-      arglist => { "-c", "touch $(G.testdir)/desc_start" };
+    "/bin/sh" arglist => { "-c", "touch $(G.testdir)/desc_start" };
 
     # The shell waits for its sleep, so at the 2 second timeout the
     # sleep is alive holding the pipe. Only ending it too releases
@@ -55,8 +54,7 @@ bundle agent test
       contain => exec_timeout_2,
       classes => dcs_all_classes("desc_timed");
 
-    "/bin/sh"
-      arglist => { "-c", "touch $(G.testdir)/desc_end" };
+    "/bin/sh" arglist => { "-c", "touch $(G.testdir)/desc_end" };
 }
 
 body contain exec_timeout_2
@@ -80,7 +78,7 @@ bundle agent check
       and => {
         fileexists("$(G.testdir)/desc_start"),
         fileexists("$(G.testdir)/desc_end"),
-        islessthan("$(elapsed)", "20")
+        islessthan("$(elapsed)", "20"),
       },
       scope => "namespace";
 
