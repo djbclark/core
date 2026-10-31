@@ -46,6 +46,7 @@
 #include <expand.h>
 #include <file_lib.h>                   /* FileLock */
 #include <known_dirs.h>                 /* GetStateDir() */
+#include <mod_reactor.h>                /* ReactorBundleCheck() */
 
 static const char *const POLICY_ERROR_BUNDLE_NAME_RESERVED =
     "Use of a reserved container name as a bundle name \"%s\"";
@@ -731,6 +732,11 @@ static bool PolicyCheckBundle(const Bundle *bundle, Seq *errors)
 
     success &= PolicyCheckBundleSections(bundle->sections, errors);
     success &= PolicyCheckBundleSections(bundle->custom_sections, errors);
+
+    if (StringEqual(bundle->type, CF_REACTORC))
+    {
+        success &= ReactorBundleCheck(bundle, errors);
+    }
 
     return success;
 }
@@ -1542,6 +1548,37 @@ static Constraint *ConstraintNew(const char *lval, Rval rval, const char *classe
     cp->references_body = references_body;
 
     return cp;
+}
+
+Promise *PromiseCopy(const Promise *pp)
+{
+    assert(pp != NULL);
+
+    Promise *copy = xcalloc(1, sizeof(Promise));
+    copy->parent_section = pp->parent_section;
+    copy->classes = SafeStringDuplicate(pp->classes);
+    copy->comment = SafeStringDuplicate(pp->comment);
+    copy->promiser = SafeStringDuplicate(pp->promiser);
+    copy->promisee = (pp->promisee.item != NULL) ?
+        RvalCopy(pp->promisee) : (Rval) { NULL, RVAL_TYPE_NOPROMISEE };
+    copy->org_pp = pp->org_pp;
+    copy->offset = pp->offset;
+
+    if (pp->conlist != NULL)
+    {
+        copy->conlist = SeqNew(SeqLength(pp->conlist), ConstraintDestroy);
+        for (size_t i = 0; i < SeqLength(pp->conlist); i++)
+        {
+            const Constraint *cp = SeqAt(pp->conlist, i);
+            Constraint *cp_copy = ConstraintNew(cp->lval, RvalCopy(cp->rval), cp->classes, cp->references_body);
+            cp_copy->type = POLICY_ELEMENT_TYPE_PROMISE;
+            cp_copy->parent.promise = copy;
+            cp_copy->offset = cp->offset;
+            SeqAppend(copy->conlist, cp_copy);
+        }
+    }
+
+    return copy;
 }
 
 Constraint *PromiseAppendConstraint(Promise *pp, const char *lval, Rval rval, bool references_body)
@@ -2731,8 +2768,11 @@ static bool ValidateCustomPromise(const Promise *pp, Seq *errors)
     return valid;
 }
 
-static bool BundleCallCheckArity(const Promise *pp, const Constraint *cp, Rval rval, Seq *errors)
+static bool BundleCallCheckArity(const Promise *pp, const Constraint *cp, Rval rval,
+                                 const char *const bundle_types[], Seq *errors)
 {
+    assert(bundle_types != NULL);
+
     if (rval.type != RVAL_TYPE_FNCALL)
     {
         return true;
@@ -2746,10 +2786,10 @@ static bool BundleCallCheckArity(const Promise *pp, const Constraint *cp, Rval r
         ClassRefQualify(&ref, PromiseGetNamespace(pp));
     }
 
-    const Bundle *callee = PolicyGetBundle(PolicyFromPromise(pp), ref.ns, "agent", ref.name);
-    if (!callee)
+    const Bundle *callee = NULL;
+    for (size_t i = 0; callee == NULL && bundle_types[i] != NULL; i++)
     {
-        callee = PolicyGetBundle(PolicyFromPromise(pp), ref.ns, "common", ref.name);
+        callee = PolicyGetBundle(PolicyFromPromise(pp), ref.ns, bundle_types[i], ref.name);
     }
 
     ClassRefDestroy(ref);
@@ -2767,10 +2807,12 @@ static bool BundleCallCheckArity(const Promise *pp, const Constraint *cp, Rval r
     return true;
 }
 
-bool PromiseCheckBundleCallArity(const Promise *pp, const char *lval, Seq *errors)
+bool PromiseCheckBundleCallArity(const Promise *pp, const char *lval,
+                                 const char *const bundle_types[], Seq *errors)
 {
     assert(pp != NULL);
     assert(lval != NULL);
+    assert(bundle_types != NULL);
 
     bool success = true;
 
@@ -2785,12 +2827,12 @@ bool PromiseCheckBundleCallArity(const Promise *pp, const char *lval, Seq *error
             {
                 for (const Rlist *rp = RvalRlistValue(cp->rval); rp != NULL; rp = rp->next)
                 {
-                    success &= BundleCallCheckArity(pp, cp, rp->val, errors);
+                    success &= BundleCallCheckArity(pp, cp, rp->val, bundle_types, errors);
                 }
             }
             else
             {
-                success &= BundleCallCheckArity(pp, cp, cp->rval, errors);
+                success &= BundleCallCheckArity(pp, cp, cp->rval, bundle_types, errors);
             }
         }
     }

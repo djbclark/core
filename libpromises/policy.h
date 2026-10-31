@@ -206,13 +206,31 @@ void BundleSectionDestroy(BundleSection *section);
 
 void PromiseDestroy(Promise *pp);
 
+/**
+ * @brief Deep copy of a promise and its constraints, e.g. of an expanded
+ *        promise to keep after its iteration. The copy refers to the same
+ *        bundle section and unexpanded promise, so it must not be used once
+ *        the policy is destroyed.
+ */
+Promise *PromiseCopy(const Promise *pp);
+
 Constraint *PromiseAppendConstraint(Promise *promise, const char *lval, Rval rval, bool references_body);
 
 const char *PromiseGetNamespace(const Promise *pp);
 const Bundle *PromiseGetBundle(const Promise *pp);
 const Policy *PromiseGetPolicy(const Promise *pp);
 
-bool PromiseCheckBundleCallArity(const Promise *pp, const char *lval, Seq *errors);
+/**
+ * @brief Checks that the bundle calls of the lval attribute of the promise
+ *        (a bundle or a list of bundles) pass as many arguments as the called
+ *        bundles take.
+ * @param bundle_types The types of bundle the calls can refer to, in order of
+ *                     lookup, terminated by NULL
+ * @return false if a call has a wrong number of arguments, appending the
+ *         error to errors, true otherwise
+ */
+bool PromiseCheckBundleCallArity(const Promise *pp, const char *lval,
+                                 const char *const bundle_types[], Seq *errors);
 
 static inline const char *PromiseGetPromiseType(const Promise *pp)
 {
