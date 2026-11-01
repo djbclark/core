@@ -1,0 +1,65 @@
+body common control
+{
+  inputs => { "../default.sub.cf" };
+  bundlesequence => { default("$(this.promise_filename)") };
+  version => "1.0";
+}
+
+bundle common test_user
+{
+  classes:
+    "running_as_root"
+      expression => strcmp("$(sys.user_data[uid])", "0");
+}
+
+bundle agent test
+{
+  meta:
+    "test_soft_fail"
+      string => "(solaris|aix|hpux|windows)",
+      # ENT-6540 exotics fail to delete chroot
+      # ENT-10254 tests fail on Windows due to CRLF
+      meta => { "ENT-6540", "ENT-10254" };
+
+    "test_skip_unsupported"
+      string => "running_as_root|using_fakeroot|windows",
+      comment => "chown to another owner only fails for an unprivileged user";
+
+    "description"
+      string => "Test that --simulate=manifest as non-root lists a file whose promise sets an owner, and warns that ownership can't be simulated";
+}
+
+bundle agent check
+{
+  vars:
+    "command"
+      string => "$(sys.cf_agent) -Kf $(this.promise_filename).sub --simulate=manifest 2>&1";
+
+    "output"
+      string => execresult($(command), "useshell");
+
+  classes:
+    "listed"
+      expression => regcmp(
+        ".*\Q'$(G.testroot)/owned-by-root' is a regular file\E.*",
+        $(output));
+
+    "warned"
+      expression => regcmp(
+        ".*warning: [^\n]*ownership changes cannot be simulated.*",
+        $(output));
+
+    "no_error"
+      not => regcmp(".*error: Cannot set ownership.*", $(output));
+
+    "ok" and => { "listed", "warned", "no_error" };
+
+  reports:
+    ok::
+      "$(this.promise_filename) Pass";
+
+    !ok::
+      "$(this.promise_filename) FAIL";
+      "listed: $(listed) warned: $(warned) no_error: $(no_error)";
+      "output: $(output)";
+}

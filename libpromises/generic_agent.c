@@ -1637,6 +1637,15 @@ void GenericAgentInitialize(EvalContext *ctx, GenericAgentConfig *config)
         RegisterCleanupFunction(DeleteChangesChroot);
         Log(LOG_LEVEL_WARNING, "All changes in files will be made in the '%s' chroot",
             changes_chroot);
+#ifndef __MINGW32__
+        if (getuid() != 0)
+        {
+            Log(LOG_LEVEL_WARNING,
+                "Not running as root, ownership changes cannot be "
+                "simulated, so files show the owner of user %ju",
+                (uintmax_t) getuid());
+        }
+#endif
     }
 
 /* Define trusted directories */
