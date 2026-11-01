@@ -400,7 +400,7 @@ bool LoadMountInfo(Seq *list)
 
     buf1[i] = '\0';
 
-    SetTimeOut(RPCTIMEOUT);
+    SetChildTimeOut(RPCTIMEOUT);
 
     if ((pp = cf_popen(buf1, "r", true)) == NULL)
     {
@@ -580,8 +580,7 @@ bool LoadMountInfo(Seq *list)
     }
 
     free(vbuff);
-    alarm(0);
-    signal(SIGALRM, SIG_DFL);
+    DisarmTimeOut();
     cf_pclose(pp);
     return true;
 }
@@ -1121,7 +1120,7 @@ void MountAll()
     }
 #endif
 
-    SetTimeOut(RPCTIMEOUT);
+    SetChildTimeOut(RPCTIMEOUT);
 
     const char *cmd = VMOUNTCOMM[VSYSTEMHARDCLASS];
 
@@ -1177,8 +1176,7 @@ void MountAll()
     }
 
     free(line);
-    alarm(0);
-    signal(SIGALRM, SIG_DFL);
+    DisarmTimeOut();
     cf_pclose(pp);
 }
 
@@ -1435,7 +1433,7 @@ PromiseResult ReconcileMountOptions(EvalContext *ctx, char *name, const Attribut
             free(ropts);
 
             Log(LOG_LEVEL_VERBOSE, "Reconciling '%s' via remount: %s", name, comm);
-            SetTimeOut(timeout);
+            SetChildTimeOut(timeout);
 
             FILE *pfp = cf_popen(comm, "r", true);
             if (pfp == NULL)

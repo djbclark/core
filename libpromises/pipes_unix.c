@@ -32,6 +32,7 @@
 #include <eval_context.h>
 #include <file_lib.h>
 #include <signals.h>
+#include <timeout.h>
 #include <string_lib.h>
 
 static bool CfSetuid(uid_t uid, gid_t gid);
@@ -168,6 +169,10 @@ typedef struct
 
 static pid_t GenericCreatePipeAndFork(IOPipe *pipes)
 {
+    /* The request made by SetChildTimeOut() is for this call only, so that
+     * one abandoned by a failure below cannot time out the next child. */
+    const int timeout = TakeChildTimeOut();
+
     for (int i = 0; i < 2; i++)
     {
         if (pipes[i].type && !PipeTypeIsOk(pipes[i].type))
@@ -194,10 +199,28 @@ static pid_t GenericCreatePipeAndFork(IOPipe *pipes)
         return -1;
     }
 
+    /* A child under a timeout leads a process group of its own, so that
+     * whatever it spawns can be terminated with it. Otherwise a descendant
+     * that outlives it keeps the pipe open and the read in the parent
+     * blocked. Only then: a child outside the terminal's foreground group is
+     * stopped by SIGTTIN when it reads the terminal. */
+    const bool own_group = (timeout > 0);
+
+    /* The agent passes SIGINT and SIGTERM on to that group: hold them until
+     * the child is published, or one arriving first would find no child to
+     * pass it to. */
+    sigset_t held, previous;
+    sigemptyset(&held);
+    sigaddset(&held, SIGINT);
+    sigaddset(&held, SIGTERM);
+    pthread_sigmask(SIG_BLOCK, &held, &previous);
+
     pid_t pid = -1;
 
     if ((pid = fork()) == (pid_t) -1)
     {
+        pthread_sigmask(SIG_SETMASK, &previous, NULL);
+
         /* One pipe will be always here. */
         close(pipes[0].pipe_desc[0]);
         close(pipes[0].pipe_desc[1]);
@@ -236,9 +259,25 @@ static pid_t GenericCreatePipeAndFork(IOPipe *pipes)
         sigset_t sigmask;
         sigemptyset(&sigmask);
         sigprocmask(SIG_SETMASK, &sigmask, NULL);
+
+        if (own_group)
+        {
+            setpgid(0, 0);
+        }
+    }
+    else if (own_group)
+    {
+        setpgid(pid, pid); /* the child may not have run yet */
     }
 
     ALARM_PID = (pid != 0 ? pid : -1);
+    SetTimedChildGroup((own_group && (pid > 0)) ? pid : -1);
+
+    if (pid > 0)
+    {
+        StartTimeOutClock(timeout);
+        pthread_sigmask(SIG_SETMASK, &previous, NULL);
+    }
 
     return pid;
 }
@@ -794,8 +833,17 @@ static int cf_pwait(pid_t pid)
             Log(LOG_LEVEL_ERR,
                 "Waiting for child PID %jd failed (waitpid: %s)",
                 (intmax_t) pid, GetErrorStr());
+            if (ALARM_PID == pid)
+            {
+                ALARM_PID = -1; /* possibly reaped, so free to be recycled */
+            }
             return -1;
         }
+    }
+
+    if (ALARM_PID == pid)
+    {
+        ALARM_PID = -1; /* reaped, so the pid is free to be recycled */
     }
 
     if (!WIFEXITED(status))
@@ -850,8 +898,6 @@ int cf_pclose(FILE *pp)
         return -1;
     }
 
-    ALARM_PID = -1;
-
     if (fd >= MAX_FD)
     {
         ThreadUnlock(cft_count);
@@ -873,7 +919,11 @@ int cf_pclose(FILE *pp)
             GetErrorStr());
     }
 
-    return cf_pwait(pid);
+    /* Stay registered until reaped: a command that closed its output but
+     * is still running must remain killable by TimeOut() during the wait. */
+    int ret = cf_pwait(pid);
+    ALARM_PID = -1;
+    return ret;
 }
 
 int cf_pclose_full_duplex_side(int fd)

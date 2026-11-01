@@ -1,0 +1,357 @@
+#include <test.h>
+
+#include <cf3.defs.h>
+#include <cf3.extern.h>
+#include <pipes.h>
+#include <timeout.h>
+#include <signals.h>
+#include <poll.h>
+#include <sys/wait.h>
+
+/* Runs "/bin/sleep <seconds>" under the way the agent reads a command's
+ * output, which ends when the child does, and returns how long it took. No
+ * shell here, as a shell terminated on its own would leave its child holding
+ * the pipe open. */
+static time_t RunSleep(const char *command)
+{
+    time_t start = time(NULL);
+    FILE *pfp = cf_popen(command, "r", true);
+    assert_true(pfp != NULL);
+
+    char line[16];
+    assert_true(fgets(line, sizeof(line), pfp) == NULL);
+    cf_pclose(pfp);
+
+    return time(NULL) - start;
+}
+
+/* A timeout must still bound a child forked after it would already have
+ * expired: the child is terminated one timeout after it started. */
+static void test_timeout_survives_a_stall_before_fork(void)
+{
+    SetChildTimeOut(1);
+
+    /* Stands in for the agent stalling between arming and forking. */
+    sleep(2);
+
+    time_t elapsed = RunSleep("/bin/sleep 20");
+
+    DisarmTimeOut();
+
+    assert_true(elapsed < 15);
+}
+
+/* SetTimeOut() is for callers that never fork, so it arms at once; only
+ * SetChildTimeOut() waits for a child. DisarmTimeOut() undoes both. */
+static void test_SetTimeOut_arms_at_once_SetChildTimeOut_waits(void)
+{
+    SetTimeOut(60);
+    assert_true(alarm(0) > 0);
+    DisarmTimeOut();
+    assert_int_equal(alarm(0), 0);
+
+    SetChildTimeOut(60);
+    assert_int_equal(alarm(0), 0);
+    DisarmTimeOut();
+}
+
+/* A request dropped by DisarmTimeOut() must not start later, whoever installs
+ * the handler again in the meantime. */
+static void test_disarmed_timeout_does_not_start_later(void)
+{
+    SetChildTimeOut(1);
+    DisarmTimeOut();
+    signal(SIGALRM, (void *) TimeOut);
+
+    time_t elapsed = RunSleep("/bin/sleep 3");
+
+    DisarmTimeOut();
+
+    assert_true(elapsed >= 3);
+}
+
+/* A request is for one cf_popen*() call only: one that fails before forking
+ * must not leave the request for the next, unrelated, child. */
+static void test_failed_popen_does_not_leave_timeout_for_next_child(void)
+{
+    SetChildTimeOut(1);
+    assert_true(cf_popen("/bin/true", "x", true) == NULL);
+
+    time_t elapsed = RunSleep("/bin/sleep 3");
+
+    DisarmTimeOut();
+
+    assert_true(elapsed >= 3);
+}
+
+/* Runs a shell command under a one second timeout, the way the agent reads
+ * its output (which ends when everything holding the pipe is gone), and
+ * returns how long it took. */
+static time_t RunShellUnderTimeOut(const char *command)
+{
+    SetChildTimeOut(1);
+
+    time_t start = time(NULL);
+    FILE *pfp = cf_popen_sh(command, "r");
+    assert_true(pfp != NULL);
+
+    char line[16];
+    assert_true(fgets(line, sizeof(line), pfp) == NULL);
+    cf_pclose(pfp);
+    time_t elapsed = time(NULL) - start;
+
+    DisarmTimeOut();
+    return elapsed;
+}
+
+/* A timeout must also end what the command spawned: a shell terminated on its
+ * own leaves its child holding the output pipe open, and the read blocks for
+ * as long as that lives. */
+static void test_timeout_terminates_what_the_command_spawned(void)
+{
+    assert_true(RunShellUnderTimeOut("sleep 30; exit 0") < 15);
+}
+
+/* The same where the shell has already exited when the timeout fires. It is
+ * a zombie until reaped, and on macOS getpgid() fails for a zombie although
+ * its group lives on. */
+static void test_timeout_terminates_group_of_exited_leader(void)
+{
+    assert_true(RunShellUnderTimeOut("sleep 30 &") < 15);
+}
+
+static bool ReadableWithin(int fd, int seconds)
+{
+    struct pollfd p = { .fd = fd, .events = POLLIN };
+    return poll(&p, 1, seconds * 1000) == 1;
+}
+
+static long MillisecondsSince(const struct timespec *start)
+{
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (now.tv_sec - start->tv_sec) * 1000
+           + (now.tv_nsec - start->tv_nsec) / 1000000;
+}
+
+typedef struct
+{
+    const char *command; /* %d is the fd to report on */
+    int signum;          /* sent to the agent once the command is running */
+    int second_signum;   /* if not 0, sent to the agent 0.3 s later */
+    bool handled;        /* whether the command reports "handled" */
+    long min_handled_ms; /* ... not before this long after the signal */
+    long max_ms;         /* the group is gone within this long */
+} AgentCase;
+
+/* The agent is terminated through its process group, which no longer holds
+ * the children that run under a timeout: it must end them itself. The
+ * "agent" is a process of its own, running the agent's signal handler, which
+ * is sent signum once its command has printed its pid. The command is
+ * given the write end of a pipe to report on, and so is every process of its
+ * group: the read end reports end of file once all of them are gone. The
+ * command must report "handled", if it is to, once only. */
+static void AgentTerminatesCommand(const AgentCase *c)
+{
+    int alive[2];
+    assert_int_equal(pipe(alive), 0);
+
+    char command[256];
+    snprintf(command, sizeof(command), c->command, alive[1]);
+
+    fflush(NULL);
+    pid_t agent = fork();
+    assert_true(agent >= 0);
+    if (agent == 0)
+    {
+        close(alive[0]);
+        signal(SIGINT, HandleSignalsForAgent);
+        signal(SIGTERM, HandleSignalsForAgent);
+
+        SetChildTimeOut(60);
+        FILE *pfp = cf_popen_sh(command, "r");
+        char pgid[32] = "";
+        if ((pfp == NULL) || (fgets(pgid, sizeof(pgid), pfp) == NULL))
+        {
+            _exit(EXIT_FAILURE);
+        }
+        (void) !write(alive[1], pgid, strlen(pgid));
+
+        raise(c->signum);
+        _exit(EXIT_FAILURE); /* the handler exits */
+    }
+    close(alive[1]);
+
+    char reported[128] = "";
+    assert_true(ReadableWithin(alive[0], 10));
+    ssize_t length = read(alive[0], reported, sizeof(reported) - 1);
+    assert_true(length > 0);
+
+    struct timespec start;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    if (c->second_signum != 0)
+    {
+        usleep(300 * 1000);
+        kill(agent, c->second_signum);
+    }
+
+    /* The end of file means that the child's group is gone too. */
+    bool gone = false;
+    long handled_at = -1;
+    while (!gone && ReadableWithin(alive[0], 15))
+    {
+        ssize_t n = read(alive[0], reported + length,
+                         sizeof(reported) - 1 - length);
+        assert_true(n >= 0);
+        gone = (n == 0);
+        length += n;
+        if ((handled_at < 0) && (strstr(reported, "handled") != NULL))
+        {
+            handled_at = MillisecondsSince(&start);
+        }
+    }
+    const long took = MillisecondsSince(&start);
+    if (!gone)
+    {
+        kill(-atoi(reported), SIGKILL); /* do not leave the sleep behind */
+    }
+    close(alive[0]);
+
+    int status;
+    assert_int_equal(waitpid(agent, &status, 0), agent);
+    assert_true(WIFEXITED(status) && (WEXITSTATUS(status) == 0));
+    assert_true(gone);
+    const char *first = strstr(reported, "handled");
+    assert_true((first != NULL) == c->handled);
+    assert_true((first == NULL) || (strstr(first + 1, "handled") == NULL));
+    assert_true(!c->handled || (handled_at >= c->min_handled_ms));
+    assert_true(took < c->max_ms);
+}
+
+/* A command that ignores SIGINT and SIGTERM (as a background job of `sh -c`
+ * does for SIGINT) starts a job and exits, leaving that in a group whose
+ * leader is a zombie. Nothing but SIGKILL ends it, however long it takes. */
+static void test_agent_termination_ends_timed_child_group(void)
+{
+    AgentTerminatesCommand(&(AgentCase) {
+        .command = "trap '' INT TERM; sleep 30 & echo $$",
+        .signum = SIGTERM, .max_ms = 15000 });
+}
+
+/* What a command does on SIGTERM, here reporting it, must happen before it
+ * is gone, and the agent must not wait out the grace period once the group
+ * is empty: a leader that has exited is a zombie, which still counts as a
+ * member of the group until it is reaped. The command runs no job, which
+ * could be caught in the middle of its fork by the signal and so survive
+ * it. */
+static void test_agent_termination_lets_command_handle_signal(void)
+{
+    AgentTerminatesCommand(&(AgentCase) {
+        .command = "trap 'echo handled >&%d; exit 0' TERM;"
+                   " echo $$; while :; do :; done",
+        .signum = SIGTERM, .handled = true, .max_ms = 2000 });
+}
+
+/* A command that ignores SIGINT, which cf-execd sends first, is still given
+ * SIGTERM after it. */
+static void test_agent_termination_follows_sigint_with_sigterm(void)
+{
+    AgentTerminatesCommand(&(AgentCase) {
+        .command = "trap '' INT; trap 'echo handled >&%d; exit 0' TERM;"
+                   " sleep 30 & echo $$; wait",
+        .signum = SIGINT, .handled = true, .max_ms = 15000 });
+}
+
+/* cf-execd's SIGTERM, one second after its SIGINT, may arrive while the
+ * agent is still waiting on the command. It must not make it wait again, or
+ * pass the signal on early: the command, which does not exit on SIGTERM, is
+ * sent it by the agent's own schedule only, once. */
+static void test_agent_termination_does_not_wait_twice(void)
+{
+    AgentTerminatesCommand(&(AgentCase) {
+        .command = "trap '' INT; trap 'echo handled >&%d' TERM;"
+                   " echo $$; while :; do :; done",
+        .signum = SIGINT, .second_signum = SIGTERM, .handled = true,
+        .min_handled_ms = 800, .max_ms = 15000 });
+}
+
+/* A stale ALARM_PID that names the process itself must never have its own
+ * group killed, even where it leads one. */
+static void test_timed_child_group_is_never_our_own(void)
+{
+    fflush(NULL);
+    pid_t pid = fork();
+    assert_true(pid >= 0);
+    if (pid == 0)
+    {
+        setpgid(0, 0);
+        ALARM_PID = getpid();
+        SetTimedChildGroup(getpid());
+        EndTimedChildGroup(SIGTERM);
+        _exit(EXIT_SUCCESS); /* only reached if we were not killed */
+    }
+
+    int status;
+    assert_int_equal(waitpid(pid, &status, 0), pid);
+    assert_true(WIFEXITED(status) && (WEXITSTATUS(status) == EXIT_SUCCESS));
+}
+
+/* A command that was not given a group of its own may have made one for
+ * itself (setsid(1)): it is outside the agent's group on purpose, and not
+ * for the agent to kill. */
+static void test_group_the_command_made_for_itself_is_left_alone(void)
+{
+    int ready[2], go[2];
+    assert_int_equal(pipe(ready), 0);
+    assert_int_equal(pipe(go), 0);
+
+    fflush(NULL);
+    pid_t pid = fork();
+    assert_true(pid >= 0);
+    if (pid == 0)
+    {
+        char byte = 0;
+        setpgid(0, 0);
+        (void) !write(ready[1], &byte, 1);
+        (void) !read(go[0], &byte, 1);
+        _exit(EXIT_SUCCESS); /* only reached if we were not killed */
+    }
+
+    char byte = 0;
+    assert_int_equal(read(ready[0], &byte, 1), 1);
+    ALARM_PID = pid;
+    SetTimedChildGroup(-1); /* what cf_popen*() records for such a child */
+    EndTimedChildGroup(SIGTERM);
+    ALARM_PID = -1;
+    assert_int_equal(write(go[1], &byte, 1), 1);
+
+    int status;
+    assert_int_equal(waitpid(pid, &status, 0), pid);
+    assert_true(WIFEXITED(status) && (WEXITSTATUS(status) == EXIT_SUCCESS));
+
+    close(ready[0]);
+    close(ready[1]);
+    close(go[0]);
+    close(go[1]);
+}
+
+int main()
+{
+    PRINT_TEST_BANNER();
+    const UnitTest tests[] = {
+        unit_test(test_timeout_survives_a_stall_before_fork),
+        unit_test(test_SetTimeOut_arms_at_once_SetChildTimeOut_waits),
+        unit_test(test_disarmed_timeout_does_not_start_later),
+        unit_test(test_failed_popen_does_not_leave_timeout_for_next_child),
+        unit_test(test_timeout_terminates_what_the_command_spawned),
+        unit_test(test_timeout_terminates_group_of_exited_leader),
+        unit_test(test_agent_termination_ends_timed_child_group),
+        unit_test(test_agent_termination_lets_command_handle_signal),
+        unit_test(test_agent_termination_follows_sigint_with_sigterm),
+        unit_test(test_agent_termination_does_not_wait_twice),
+        unit_test(test_timed_child_group_is_never_our_own),
+        unit_test(test_group_the_command_made_for_itself_is_left_alone),
+    };
+
+    return run_tests(tests);
+}

@@ -27,6 +27,7 @@
 #include <known_dirs.h>         /* GetStateDir() */
 #include <file_lib.h>           /* FILE_SEPARATOR */
 #include <mod_custom.h>         /* TerminateCustomPromises */
+#include <timeout.h>            /* EndTimedChildGroup() */
 #include <prototypes3.h>        /* cf_closesocket() */
 
 static bool PENDING_TERMINATION = false; /* GLOBAL_X */
@@ -175,6 +176,14 @@ void HandleSignalsForAgent(int signum)
     case SIGINT:
         /* TODO don't exit from the signal handler, just set a flag. Reason is
          * that all the cleanup() hooks we register are not reentrant. */
+        /* We are leaving the child running under a timeout in a group of its
+         * own, which nothing else will end: not the signal that is killing
+         * us, and not the alarm, which dies with us. cf-execd's SIGTERM may
+         * arrive while that waits: leave the exit to the first signal. */
+        if (!EndTimedChildGroup(signum))
+        {
+            break;
+        }
         TerminateCustomPromises();
         DoCleanupAndExit(0);
     case SIGBUS:

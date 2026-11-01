@@ -159,6 +159,7 @@ check_PROGRAMS = \
 	client_code_test \
 	watcher_test \
 	file_watcher_test \
+	user_watcher_test \
 	stoppable_thread_test \
 	wakeup_channel_test
 
@@ -171,6 +172,10 @@ endif
 endif
 
 if !NT
+check_PROGRAMS += timeout_test
+timeout_test_SOURCES = timeout_test.c
+timeout_test_LDADD = ../../libpromises/libpromises.la libtest.la
+
 check_PROGRAMS += redirection_test
 noinst_PROGRAMS = redirection_test_stub
 
@@ -240,6 +245,8 @@ watcher_test_SOURCES = watcher_test.c \
 
 file_watcher_test_SOURCES = file_watcher_test.c \
 	../../cf-reactor/file_watcher.c
+
+user_watcher_test_SOURCES = user_watcher_test.c
 
 stoppable_thread_test_SOURCES = stoppable_thread_test.c \
 	../../cf-reactor/stoppable_thread.c
@@ -447,6 +454,13 @@ if !NT
 check_PROGRAMS += nfs_test
 nfs_test_SOURCES = nfs_test.c
 nfs_test_LDADD = ../../libpromises/libpromises.la libtest.la
+
+check_PROGRAMS += alarm_pid_test
+# The fdopen() override only reaches code compiled into this binary, so
+# build pipes_unix.c in instead of using libpromises' copy.
+alarm_pid_test_SOURCES = alarm_pid_test.c ../../libpromises/pipes_unix.c
+alarm_pid_test_CPPFLAGS = $(AM_CPPFLAGS)
+alarm_pid_test_LDADD = ../../cf-agent/libcf-agent.la libtest.la
 
 init_script_test_helper_SOURCES = init_script_test_helper.c
 init_script_test.sh: init_script_test_helper

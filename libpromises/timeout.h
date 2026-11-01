@@ -25,8 +25,31 @@
 #ifndef CFENGINE_TIMEOUT_H
 #define CFENGINE_TIMEOUT_H
 
+/* Arm a timeout now, for callers that do not fork. */
 void SetTimeOut(int timeout);
+/* Arm a timeout for the next child forked by cf_popen*(). The clock only
+ * starts once the child's pid is in ALARM_PID, so an alarm can never expire
+ * with no process to terminate. A request is good for one cf_popen*() call,
+ * whether or not it forks, and is dropped by DisarmTimeOut(). */
+void SetChildTimeOut(int timeout);
+/* Cancel whatever SetTimeOut() or SetChildTimeOut() requested. */
+void DisarmTimeOut(void);
+/* Used by cf_popen*(): take the request for this child, then start its clock
+ * in the parent once the child's pid is published. */
+int TakeChildTimeOut(void);
+void StartTimeOutClock(int seconds);
 void TimeOut(void);
+/* Recorded by cf_popen*() for every child it publishes in ALARM_PID: its pid
+ * if it was put in a process group of its own, else -1. */
+void SetTimedChildGroup(pid_t pid);
+/* End the process group of the child running under a timeout, if it has one
+ * of its own, for a process that is about to leave it behind: pass on
+ * signum, then SIGTERM after 1 s, then SIGKILL after 3 s, sooner once the
+ * group is empty. Meant for the handler of signum, and only calls what such
+ * a handler may. Returns false, having done nothing, if another call is
+ * already doing this (a second signal came in while it waits); the caller
+ * must then return and leave the exit to that one. */
+bool EndTimedChildGroup(int signum);
 time_t SetReferenceTime(void);
 
 #endif
