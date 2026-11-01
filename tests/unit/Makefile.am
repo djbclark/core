@@ -172,6 +172,10 @@ endif
 endif
 
 if !NT
+check_PROGRAMS += timeout_test
+timeout_test_SOURCES = timeout_test.c
+timeout_test_LDADD = ../../libpromises/libpromises.la libtest.la
+
 check_PROGRAMS += redirection_test
 noinst_PROGRAMS = redirection_test_stub
 
