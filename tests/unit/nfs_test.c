@@ -2,6 +2,21 @@
 #include <nfs.c>
 #include <nfs.h>
 #include <item_lib.h>
+#include <policy.h>
+#include <eval_context.h>
+
+/* Record the alarm() calls instead of arming a real timer. */
+static unsigned int alarm_calls[16];
+static size_t n_alarm_calls = 0;
+
+unsigned int alarm(unsigned int seconds)
+{
+    if (n_alarm_calls < sizeof(alarm_calls) / sizeof(alarm_calls[0]))
+    {
+        alarm_calls[n_alarm_calls++] = seconds;
+    }
+    return 0;
+}
 
 static void test_MatchFSInFstab(void)
 {
@@ -174,6 +189,47 @@ static void test_GetFstabEntryOptions(void)
     assert_true(GetFstabEntryOptions("/mnt/opts/nosuchmount") == NULL);
 }
 
+/* The remount timeout is armed to cover the remount command alone. It must be
+ * disarmed before the verify step, which arms its own timeout and cannot be
+ * relied upon to disarm it on every path. */
+static void test_ReconcileMountOptions_disarms_remount_timeout(void)
+{
+    VSYSTEMHARDCLASS = PLATFORM_CONTEXT_LINUX;
+
+    EvalContext *ctx = EvalContextNew();
+    Policy *policy = PolicyNew();
+    Bundle *bundle = PolicyAppendBundle(
+        policy, "default", "test", "agent", NULL, NULL, EVAL_ORDER_UNDEFINED);
+    BundleSection *section = BundleAppendSection(bundle, "mount");
+    char name[] = "/nonexistent/cfengine-nfs-test";
+    Promise *pp = BundleSectionAppendPromise(
+        section, name, (Rval) { NULL, RVAL_TYPE_NOPROMISEE }, "any", NULL);
+
+    Attributes a = { 0 };
+    a.mount.remount_timeout = 7;
+    a.mount.mount_options = RlistFromSplitString("rw", ',');
+    a.transaction.action = cfa_fix;
+
+    n_alarm_calls = 0;
+    ReconcileMountOptions(ctx, name, &a, pp);
+
+    /* The remount arms 7 seconds; the next alarm() call must disarm it,
+     * before the verify step arms its own. */
+    size_t armed = 0;
+    while ((armed < n_alarm_calls) && (alarm_calls[armed] == 0))
+    {
+        armed++; /* disarming, as SetTimeOut() may do first */
+    }
+    assert_true(armed + 1 < n_alarm_calls);
+    assert_int_equal(alarm_calls[armed], 7);
+    assert_int_equal(alarm_calls[armed + 1], 0);
+
+    signal(SIGALRM, SIG_DFL);
+    RlistDestroy(a.mount.mount_options);
+    PolicyDestroy(policy);
+    EvalContextDestroy(ctx);
+}
+
 int main()
 {
     PRINT_TEST_BANNER();
@@ -183,6 +239,7 @@ int main()
         unit_test(test_OptionStringExpandDefaults),
         unit_test(test_MountOptionsFromLine),
         unit_test(test_GetFstabEntryOptions),
+        unit_test(test_ReconcileMountOptions_disarms_remount_timeout),
     };
 
     return run_tests(tests);

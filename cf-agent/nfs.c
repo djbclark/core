@@ -1470,6 +1470,9 @@ PromiseResult ReconcileMountOptions(EvalContext *ctx, char *name, const Attribut
             continue;
         }
 
+        alarm(0);
+        signal(SIGALRM, SIG_DFL);
+
         /* Verify-after-act: confirm the live mount actually satisfies the promise. */
         if (LiveMountConverged(name, a))
         {
