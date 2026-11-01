@@ -42,6 +42,7 @@
 #include <mod_reactor.h>         // REACTOR_INTERVAL_RANGE, REACTOR_FILE_DELETED, REACTOR_*_TYPES, BundleIsReactorEventsBundle()
 #include <syntax.h>              // CheckConstraintTypeMatch(), PromiseTypeSyntaxGet(), BodySyntaxGetConstraintSyntax()
 #include <file_watcher.h>
+#include <user_watcher.h>
 #include <conversion.h>
 
 /* Resolves the agent, common or reactor bundle (looked up in that order)
@@ -132,11 +133,13 @@ static const Rlist *GetThenBundles(const Promise *pp)
 /*****************************************************************************/
 
 /* A constraint of the 'when' body passed to the watcher of an event, with the
- * type of value it accepts */
+ * type of value it accepts. An absent optional constraint isn't passed, so
+ * optional ones must come after the required ones. */
 typedef struct
 {
     const char *name;
     RvalType type;
+    bool optional;
 } EventArg;
 
 typedef struct
@@ -151,13 +154,13 @@ typedef struct
 
 static const EventArg NO_EXTRA_ARGS[] =
 {
-    { NULL, RVAL_TYPE_NOPROMISEE }
+    { NULL, RVAL_TYPE_NOPROMISEE, false }
 };
 
 static const EventArg FILE_SIZE_EXCEEDS_ARGS[] =
 {
-    { REACTOR_SIZE_THRESHOLD, RVAL_TYPE_SCALAR },
-    { NULL, RVAL_TYPE_NOPROMISEE }
+    { REACTOR_SIZE_THRESHOLD, RVAL_TYPE_SCALAR, false },
+    { NULL, RVAL_TYPE_NOPROMISEE, false }
 };
 
 #define EventTypeNew(name, type, args, new_state, destroy_state, check) \
@@ -167,6 +170,10 @@ static const EventArg FILE_SIZE_EXCEEDS_ARGS[] =
 /* A file event, about the file at the path of its constraint */
 #define FileEventTypeNew(name, check) \
     EventTypeNew(name, RVAL_TYPE_SCALAR, NO_EXTRA_ARGS, FileWatcherStateNew, FileWatcherStateDestroy, check)
+
+/* A user event, about the user with the name of its constraint */
+#define UserEventTypeNew(name, check) \
+    EventTypeNew(name, RVAL_TYPE_SCALAR, NO_EXTRA_ARGS, UserWatcherStateNew, UserWatcherStateDestroy, check)
 
 static const EventType EVENT_TABLE[] =
 {
@@ -178,6 +185,8 @@ static const EventType EVENT_TABLE[] =
     FileEventTypeNew(REACTOR_FILE_OWNER_CHANGED, FileWatcherCheckFileOwnerChanged),
     EventTypeNew(REACTOR_FILE_SIZE_EXCEEDS, RVAL_TYPE_SCALAR, FILE_SIZE_EXCEEDS_ARGS,
                  FileWatcherSizeStateNew, FileWatcherStateDestroy, FileWatcherCheckFileSizeExceeds),
+    UserEventTypeNew(REACTOR_USER_ADDED, UserWatcherCheckUserAdded),
+    UserEventTypeNew(REACTOR_USER_REMOVED, UserWatcherCheckUserRemoved),
     EventTypeNewNull()
 };
 
@@ -264,8 +273,9 @@ static bool EventsPromiseGetInterval(const Promise *pp, time_t *interval)
     return true;
 }
 
-static bool ResolveWhenBody(const Promise *pp, WatcherOptions *opt)
+static bool ResolveWhenBody(const EvalContext *ctx, const Promise *pp, WatcherOptions *opt)
 {
+    assert(ctx != NULL);
     assert(pp != NULL);
     assert(opt != NULL);
     // Get the event and its arg
@@ -279,9 +289,20 @@ static bool ResolveWhenBody(const Promise *pp, WatcherOptions *opt)
     }
 
     // If the event has additional args, add them to the list of args
+    NDEBUG_UNUSED bool seen_optional = false;
     for (const EventArg *extra_arg = event->extra_args; extra_arg->name != NULL; extra_arg++)
     {
+        /* The state constructors read args by position. So optional args
+         * must come last: an absent one then only shortens the list, instead
+         * of shifting the args after it. */
+        assert(!seen_optional || extra_arg->optional);
+        seen_optional = seen_optional || extra_arg->optional;
+
         const Constraint *con = PromiseGetConstraint(pp, extra_arg->name);
+        if (con == NULL && extra_arg->optional)
+        {
+            continue;
+        }
         if (con == NULL)
         {
             Log(LOG_LEVEL_ERR,
@@ -336,10 +357,15 @@ static bool ResolveWhenBody(const Promise *pp, WatcherOptions *opt)
         return false;
     }
 
-    opt->state = event->new_state(args);
+    opt->state = event->new_state(ctx, args);
+    RlistDestroy(args);
+    if (opt->state == NULL)
+    {
+        /* The state constructor logs why */
+        return false;
+    }
     opt->check_callback = event->check;
     opt->destroy_state = event->destroy_state;
-    RlistDestroy(args);
     return true;
 }
 
@@ -364,7 +390,7 @@ static PromiseResult KeepEventsPromise(EvalContext *ctx, const Promise *pp)
     }
 
     WatcherOptions opt;
-    if (!ResolveWhenBody(pp, &opt))
+    if (!ResolveWhenBody(ctx, pp, &opt))
     {
         return PROMISE_RESULT_FAIL;
     }

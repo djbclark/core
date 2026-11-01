@@ -115,6 +115,33 @@ static VarRef *GetCMDBVariableRef(const char *key)
     {
         ref->scope = xstrdup("variables");
     }
+    else
+    {
+        /* The key held a dot, so VarRefParse() took what precedes the first
+         * one as the scope: "com.dotted.key" is the variable "dotted.key" in
+         * the scope "com". Picking a scope like this is supported, so the
+         * documented "[namespace:]bundle.variable" form is only reported at
+         * the verbose level. Any other shape cannot be that form: the
+         * variable name still holds a dot, which a vars promise cannot
+         * create, or one half is empty. It is more likely a flat key meant
+         * literally. */
+        char *address = VarRefToString(ref, true);
+        if (!StringEqual(ref->scope, "") && !StringEqual(ref->lval, "") &&
+            (strchr(ref->lval, '.') == NULL))
+        {
+            Log(LOG_LEVEL_VERBOSE, "The CMDB key '%s' names the '%s' scope,"
+                " the variable is addressed as '%s'",
+                key, ref->scope, address);
+        }
+        else
+        {
+            Log(LOG_LEVEL_WARNING, "The '.' in the CMDB key '%s' was taken"
+                " as a scope separator: the variable is named '%s' in the"
+                " '%s' scope, addressed as '%s'",
+                key, ref->lval, ref->scope, address);
+        }
+        free(address);
+    }
     return ref;
 }
 
