@@ -83,14 +83,54 @@ void StartTimeOutClock(int seconds)
 
 /*************************************************************************/
 
+/* The child last published in ALARM_PID, if it was put in a process group of
+ * its own (see cf_popen*()), else -1. Recorded at fork time because
+ * getpgid() cannot be asked later: on macOS it fails for a group leader that
+ * has exited and not been reaped, while its group lives on. */
+static pid_t TIMED_GROUP = -1; /* GLOBAL_X */
+
+void SetTimedChildGroup(pid_t pid)
+{
+    TIMED_GROUP = pid;
+}
+
+#ifndef __MINGW32__
+/* Kill the group of pid, if it is the timed child's. It never is our own
+ * group, nor that of a command that was not given a group of its own, which
+ * may have made one for itself with setsid(). Only calls what a signal
+ * handler may. */
+static void KillGroupOfTimedChild(pid_t pid)
+{
+    if ((pid > 1) && (pid == TIMED_GROUP) && (pid != getpid()))
+    {
+        kill(-pid, SIGKILL);
+    }
+}
+#endif
+
+void KillTimedChildGroup(void)
+{
+#ifndef __MINGW32__
+    KillGroupOfTimedChild(ALARM_PID);
+#endif
+}
+
 void TimeOut()
 {
     alarm(0);
 
     if (ALARM_PID != -1)
     {
-        Log(LOG_LEVEL_VERBOSE, "Time out of process %jd", (intmax_t)ALARM_PID);
-        GracefulTerminate(ALARM_PID, PROCESS_START_TIME_UNKNOWN);
+        const pid_t pid = ALARM_PID;
+        Log(LOG_LEVEL_VERBOSE, "Time out of process %jd", (intmax_t) pid);
+
+        GracefulTerminate(pid, PROCESS_START_TIME_UNKNOWN);
+
+#ifndef __MINGW32__
+        /* Whatever the process spawned survives it and keeps its output pipe
+         * open. */
+        KillGroupOfTimedChild(pid);
+#endif
     }
     else
     {

@@ -39,6 +39,12 @@ void DisarmTimeOut(void);
 int TakeChildTimeOut(void);
 void StartTimeOutClock(int seconds);
 void TimeOut(void);
+/* Recorded by cf_popen*() for every child it publishes in ALARM_PID: its pid
+ * if it was put in a process group of its own, else -1. */
+void SetTimedChildGroup(pid_t pid);
+/* Kill the process group of the child running under a timeout, if it has one
+ * of its own. For a process that is about to leave it behind. */
+void KillTimedChildGroup(void);
 time_t SetReferenceTime(void);
 
 #endif
