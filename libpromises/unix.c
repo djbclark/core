@@ -246,6 +246,7 @@ bool ShellCommandReturnsZero(const char *command, ShellType shell)
                 {
                     continue;
                 }
+                ALARM_PID = -1;
                 return false;
             }
             /* wait_result == 0: child is still running */
@@ -259,6 +260,7 @@ bool ShellCommandReturnsZero(const char *command, ShellType shell)
                 {
                     /* Child has been signalled; just reap it. */
                 }
+                ALARM_PID = -1;
                 return false;
             }
             struct timespec poll_interval = {
@@ -268,6 +270,7 @@ bool ShellCommandReturnsZero(const char *command, ShellType shell)
             nanosleep(&poll_interval, NULL);
         }
 
+        ALARM_PID = -1; /* reaped, so the pid is free to be recycled */
         return (WEXITSTATUS(status) == 0);
     }
 
