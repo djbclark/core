@@ -808,6 +808,11 @@ static int cf_pwait(pid_t pid)
         }
     }
 
+    if (ALARM_PID == pid)
+    {
+        ALARM_PID = -1; /* reaped, so the pid is free to be recycled */
+    }
+
     if (!WIFEXITED(status))
     {
         Log(LOG_LEVEL_VERBOSE,

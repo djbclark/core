@@ -372,6 +372,11 @@ static ActionResult RepairExec(EvalContext *ctx, const Attributes *a,
         if (pfp == NULL)
         {
             Log(LOG_LEVEL_ERR, "Couldn't open pipe to command '%s'. (cf_popen: %s)", cmdline, GetErrorStr());
+            if (a->contain.timeout != CF_NOINT)
+            {
+                alarm(0);
+                signal(SIGALRM, SIG_DFL);
+            }
             return ACTION_RESULT_FAILED;
         }
 
