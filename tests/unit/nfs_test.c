@@ -174,6 +174,59 @@ static void test_GetFstabEntryOptions(void)
     assert_true(GetFstabEntryOptions("/mnt/opts/nosuchmount") == NULL);
 }
 
+/* Only here to interrupt a read: SA_RESTART is deliberately not set. */
+static void Interrupt(int signum)
+{
+    (void) signum;
+}
+
+/* LoadMountInfo() arms its own timeout and must not leave it armed when it
+ * returns early: it would expire later, and terminate whatever child is
+ * running by then. The early return here is a read error, made by
+ * interrupting the read of the command's output with a signal.
+ *
+ * The command is /bin/sh (that of the Windows class cut at its first space,
+ * as LoadMountInfo() does), running a script from stdin in place of mount:
+ * it signals us while we are blocked reading its output, which stays empty. */
+static void test_LoadMountInfo_disarms_timeout_on_read_error(void)
+{
+    const char script[] =
+        "sleep 1\nkill -USR1 $PPID\nsleep 1\nkill -USR1 $PPID\n";
+    int script_pipe[2];
+    assert_int_equal(pipe(script_pipe), 0);
+    assert_int_equal(write(script_pipe[1], script, sizeof(script) - 1),
+                     sizeof(script) - 1);
+    close(script_pipe[1]);
+    int saved_stdin = dup(STDIN_FILENO);
+    assert_true(dup2(script_pipe[0], STDIN_FILENO) == STDIN_FILENO);
+    close(script_pipe[0]);
+
+    struct sigaction interrupt = { .sa_handler = Interrupt };
+    sigemptyset(&interrupt.sa_mask);
+    struct sigaction previous;
+    assert_int_equal(sigaction(SIGUSR1, &interrupt, &previous), 0);
+
+    const PlatformContext saved_class = VSYSTEMHARDCLASS;
+    VSYSTEMHARDCLASS = PLATFORM_CONTEXT_WINDOWS_NT;
+
+    Seq *list = SeqNew(1, NULL);
+    const bool loaded = LoadMountInfo(list);
+    const unsigned int still_armed = alarm(0);
+
+    SeqDestroy(list);
+    VSYSTEMHARDCLASS = saved_class;
+    sigaction(SIGUSR1, &previous, NULL);
+    signal(SIGALRM, SIG_DFL);
+    if (saved_stdin >= 0)
+    {
+        dup2(saved_stdin, STDIN_FILENO);
+        close(saved_stdin);
+    }
+
+    assert_false(loaded);
+    assert_int_equal(still_armed, 0);
+}
+
 int main()
 {
     PRINT_TEST_BANNER();
@@ -183,6 +236,7 @@ int main()
         unit_test(test_OptionStringExpandDefaults),
         unit_test(test_MountOptionsFromLine),
         unit_test(test_GetFstabEntryOptions),
+        unit_test(test_LoadMountInfo_disarms_timeout_on_read_error),
     };
 
     return run_tests(tests);
