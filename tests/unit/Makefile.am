@@ -451,6 +451,10 @@ check_PROGRAMS += nfs_test
 nfs_test_SOURCES = nfs_test.c
 nfs_test_LDADD = ../../libpromises/libpromises.la libtest.la
 
+check_PROGRAMS += alarm_pid_test
+alarm_pid_test_SOURCES = alarm_pid_test.c
+alarm_pid_test_LDADD = ../../cf-agent/libcf-agent.la libtest.la
+
 init_script_test_helper_SOURCES = init_script_test_helper.c
 init_script_test.sh: init_script_test_helper
 CLEANFILES += init_script_test_helper
