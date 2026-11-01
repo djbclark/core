@@ -1,0 +1,54 @@
+#######################################################
+#
+# A commands: promise whose exec_timeout fires must be reported as timed
+# out even if the command then exits 0. The exit status of a command that
+# was signalled does not say whether it ran to completion.
+#
+#######################################################
+body common control
+{
+  inputs => { "../../default.sub.cf" };
+  bundlesequence => { default("$(this.promise_filename)") };
+  version => "1.0";
+}
+
+#######################################################
+bundle agent test
+{
+  meta:
+    "description"
+      string => "A fired exec_timeout overrides an exit status of 0";
+
+    "test_skip_unsupported"
+      string => "windows",
+      comment => "Runs a POSIX shell payload";
+
+  commands:
+    # The shell ignores the signals sent when the 2 second timeout fires and
+    # exits 0 after 3 seconds, before the termination ladder reaches SIGKILL.
+    "/bin/sh"
+      arglist => { "-c", "trap '' INT TERM; sleep 3; exit 0" },
+      contain => exec_timeout_2,
+      classes => dcs_all_classes("timeout_exit0");
+}
+
+body contain exec_timeout_2
+{
+  exec_timeout => "2";
+}
+
+#######################################################
+bundle agent check
+{
+  methods:
+    "any"
+      usebundle => dcs_passif_expected(
+        "timeout_exit0_repair_timeout",
+        "timeout_exit0_promise_kept,timeout_exit0_promise_repaired",
+        $(this.promise_filename)
+      ),
+      inherit => "true";
+}
+
+### PROJECT_ID: core
+### CATEGORY_ID: 26

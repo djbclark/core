@@ -26,11 +26,20 @@
 #include <timeout.h>
 #include <process_lib.h>
 
+/* Written from the SIGALRM handler, hence volatile sig_atomic_t. */
+static volatile sig_atomic_t TIMEOUT_FIRED = 0; /* GLOBAL_X */
+
 void SetTimeOut(int timeout)
 {
     ALARM_PID = -1;
+    TIMEOUT_FIRED = 0;
     signal(SIGALRM, (void *) TimeOut);
     alarm(timeout);
+}
+
+bool TimeOutHasFired(void)
+{
+    return TIMEOUT_FIRED != 0;
 }
 
 /*************************************************************************/
@@ -38,6 +47,7 @@ void SetTimeOut(int timeout)
 void TimeOut()
 {
     alarm(0);
+    TIMEOUT_FIRED = 1;
 
     if (ALARM_PID != -1)
     {
