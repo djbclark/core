@@ -32,6 +32,7 @@
 #include <eval_context.h>
 #include <file_lib.h>
 #include <signals.h>
+#include <timeout.h>
 #include <string_lib.h>
 
 static bool CfSetuid(uid_t uid, gid_t gid);
@@ -168,6 +169,10 @@ typedef struct
 
 static pid_t GenericCreatePipeAndFork(IOPipe *pipes)
 {
+    /* The request made by SetChildTimeOut() is for this call only, so that
+     * one abandoned by a failure below cannot time out the next child. */
+    const int timeout = TakeChildTimeOut();
+
     for (int i = 0; i < 2; i++)
     {
         if (pipes[i].type && !PipeTypeIsOk(pipes[i].type))
@@ -239,6 +244,11 @@ static pid_t GenericCreatePipeAndFork(IOPipe *pipes)
     }
 
     ALARM_PID = (pid != 0 ? pid : -1);
+
+    if (pid > 0)
+    {
+        StartTimeOutClock(timeout);
+    }
 
     return pid;
 }

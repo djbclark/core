@@ -302,7 +302,7 @@ static ActionResult RepairExec(EvalContext *ctx, const Attributes *a,
     {
         if (a->contain.timeout != CF_NOINT)
         {
-            SetTimeOut(a->contain.timeout);
+            SetChildTimeOut(a->contain.timeout);
         }
 
 #ifndef __MINGW32__
@@ -324,6 +324,10 @@ static ActionResult RepairExec(EvalContext *ctx, const Attributes *a,
                                            a->transaction.background);
 #else // !__MINGW32__
             Log(LOG_LEVEL_ERR, "Powershell is only supported on Windows");
+            if (a->contain.timeout != CF_NOINT)
+            {
+                DisarmTimeOut();
+            }
             return ACTION_RESULT_FAILED;
 #endif // !__MINGW32__
         }
@@ -472,8 +476,7 @@ static ActionResult RepairExec(EvalContext *ctx, const Attributes *a,
 
     if (a->contain.timeout != CF_NOINT)
     {
-        alarm(0);
-        signal(SIGALRM, SIG_DFL);
+        DisarmTimeOut();
     }
 
     Log(info_or_verbose, "Completed execution of '%s'", cmdline);

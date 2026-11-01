@@ -174,6 +174,97 @@ static void test_GetFstabEntryOptions(void)
     assert_true(GetFstabEntryOptions("/mnt/opts/nosuchmount") == NULL);
 }
 
+/* Only here to interrupt a read: SA_RESTART is deliberately not set. */
+static void Interrupt(int signum)
+{
+    (void) signum;
+}
+
+/* Runs LoadMountInfo() with a shell script from stdin in place of the mount
+ * command, and says whether it returned true and whether a timeout was
+ * still armed when it returned (which it must not be: the alarm would expire
+ * later, and terminate whatever child is running by then).
+ *
+ * This relies on the mount command of the Windows NT class being "/bin/sh
+ * /etc/fstab", which LoadMountInfo() cuts at the first space. If that row of
+ * the table in nfs.c changes, so does the meaning of these tests. */
+static void RunLoadMountInfo(const char *script, bool *loaded,
+                             unsigned int *still_armed)
+{
+    int script_pipe[2];
+    assert_int_equal(pipe(script_pipe), 0);
+    assert_int_equal(write(script_pipe[1], script, strlen(script)),
+                     strlen(script));
+    close(script_pipe[1]);
+    int saved_stdin = dup(STDIN_FILENO);
+    assert_true(dup2(script_pipe[0], STDIN_FILENO) == STDIN_FILENO);
+    close(script_pipe[0]);
+
+    const PlatformContext saved_class = VSYSTEMHARDCLASS;
+    VSYSTEMHARDCLASS = PLATFORM_CONTEXT_WINDOWS_NT;
+
+    Seq *list = SeqNew(1, NULL);
+    *loaded = LoadMountInfo(list);
+    *still_armed = alarm(0);
+
+    SeqDestroy(list);
+    VSYSTEMHARDCLASS = saved_class;
+    signal(SIGALRM, SIG_DFL);
+    if (saved_stdin >= 0)
+    {
+        dup2(saved_stdin, STDIN_FILENO);
+        close(saved_stdin);
+    }
+}
+
+/* The early return made by a line of output that mentions an RPC failure. */
+static void test_LoadMountInfo_disarms_timeout_on_rpc_error(void)
+{
+    bool loaded = true;
+    unsigned int still_armed = 1;
+    RunLoadMountInfo("echo 'RPC: Timed out'\n", &loaded, &still_armed);
+
+    assert_false(loaded);
+    assert_int_equal(still_armed, 0);
+}
+
+/* The early return made by a read error, which is made here by interrupting
+ * the read of the command's output with a signal. The script signals us
+ * once we are blocked in that read, which stays empty: it waits until ps
+ * shows us asleep (we have nothing else to sleep on between the fork and the
+ * read), then signals three times in case that sleep was not the read. All
+ * of this is over before the script exits, so the handler is still in place
+ * for every signal. */
+static void test_LoadMountInfo_disarms_timeout_on_read_error(void)
+{
+    const char script[] =
+        "n=0\n"
+        "while [ $n -lt 600 ]\n"
+        "do\n"
+        "    case $(ps -o stat= -p $PPID) in *S*) break;; esac\n"
+        "    sleep 0.1\n"
+        "    n=$((n + 1))\n"
+        "done\n"
+        "for i in 1 2 3\n"
+        "do\n"
+        "    kill -USR1 $PPID\n"
+        "    sleep 0.1\n"
+        "done\n";
+
+    struct sigaction interrupt = { .sa_handler = Interrupt };
+    sigemptyset(&interrupt.sa_mask);
+    struct sigaction previous;
+    assert_int_equal(sigaction(SIGUSR1, &interrupt, &previous), 0);
+
+    bool loaded = true;
+    unsigned int still_armed = 1;
+    RunLoadMountInfo(script, &loaded, &still_armed);
+    sigaction(SIGUSR1, &previous, NULL);
+
+    assert_false(loaded);
+    assert_int_equal(still_armed, 0);
+}
+
 int main()
 {
     PRINT_TEST_BANNER();
@@ -183,6 +274,8 @@ int main()
         unit_test(test_OptionStringExpandDefaults),
         unit_test(test_MountOptionsFromLine),
         unit_test(test_GetFstabEntryOptions),
+        unit_test(test_LoadMountInfo_disarms_timeout_on_rpc_error),
+        unit_test(test_LoadMountInfo_disarms_timeout_on_read_error),
     };
 
     return run_tests(tests);
