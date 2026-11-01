@@ -25,7 +25,12 @@
 #ifndef CFENGINE_TIMEOUT_H
 #define CFENGINE_TIMEOUT_H
 
+/* Arm a timeout for the next child forked by cf_popen*(). The clock only
+ * starts once the child's pid is in ALARM_PID, so an alarm can never expire
+ * with no process to terminate. */
 void SetTimeOut(int timeout);
+/* Called by cf_popen*() in the parent, after publishing the child's pid. */
+void StartTimeOutClock(void);
 void TimeOut(void);
 time_t SetReferenceTime(void);
 

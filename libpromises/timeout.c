@@ -26,11 +26,40 @@
 #include <timeout.h>
 #include <process_lib.h>
 
+/* Seconds requested by SetTimeOut(), waiting for cf_popen() to publish the
+ * pid of the child they are meant for. */
+static int TIMEOUT_PENDING = 0; /* GLOBAL_X */
+
 void SetTimeOut(int timeout)
 {
     ALARM_PID = -1;
     signal(SIGALRM, (void *) TimeOut);
+#if defined(__MINGW32__) || defined(__CYGWIN__)
+    /* pipes_unix.c is not built here, so nothing would start the clock. */
     alarm(timeout);
+#else
+    alarm(0); /* a timer leaked by an earlier caller must not fire as ours */
+    TIMEOUT_PENDING = timeout;
+#endif
+}
+
+void StartTimeOutClock(void)
+{
+#if !defined(__MINGW32__) && !defined(__CYGWIN__)
+    const int seconds = TIMEOUT_PENDING;
+    TIMEOUT_PENDING = 0;
+
+    /* Callers that disarm their timeout restore SIG_DFL; a request they
+     * abandoned before it could start must not start now, as SIGALRM would
+     * then terminate us. */
+    struct sigaction current;
+    if ((seconds > 0)
+        && (sigaction(SIGALRM, NULL, &current) == 0)
+        && ((void *) current.sa_handler == (void *) TimeOut))
+    {
+        alarm(seconds);
+    }
+#endif
 }
 
 /*************************************************************************/

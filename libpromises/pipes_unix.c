@@ -32,6 +32,7 @@
 #include <eval_context.h>
 #include <file_lib.h>
 #include <signals.h>
+#include <timeout.h>
 #include <string_lib.h>
 
 static bool CfSetuid(uid_t uid, gid_t gid);
@@ -239,6 +240,11 @@ static pid_t GenericCreatePipeAndFork(IOPipe *pipes)
     }
 
     ALARM_PID = (pid != 0 ? pid : -1);
+
+    if (pid > 0)
+    {
+        StartTimeOutClock();
+    }
 
     return pid;
 }
