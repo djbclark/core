@@ -288,6 +288,8 @@ static ActionResult RepairExec(EvalContext *ctx, const Attributes *a,
 
     CommandPrefix(cmdline, comm);
 
+    bool timed_out = false;
+
     bool do_work_here = true;
 
 #ifndef __MINGW32__
@@ -448,7 +450,21 @@ static ActionResult RepairExec(EvalContext *ctx, const Attributes *a,
         {
             int ret = cf_pclose(pfp);
 
-            if (ret == -1)
+            /* Sampled after cf_pclose(): the command may have closed its
+             * output, ending the read loop, well before the alarm fired. */
+            timed_out = (a->contain.timeout != CF_NOINT) && TimeOutHasFired();
+
+            if (timed_out)
+            {
+                /* A command that exits 0 after being signalled would
+                 * otherwise be reported as kept or repaired. */
+                cfPS(ctx, LOG_LEVEL_ERR, PROMISE_RESULT_TIMEOUT, pp, a,
+                     "Command '%s' exceeded exec_timeout of %d seconds",
+                     pp->promiser, a->contain.timeout);
+                *result = PromiseResultUpdate(
+                    *result, PROMISE_RESULT_TIMEOUT);
+            }
+            else if (ret == -1)
             {
                 cfPS(ctx, LOG_LEVEL_ERR, PROMISE_RESULT_FAIL, pp, a, "Finished script '%s' - failed (abnormal termination)", pp->promiser);
                 *result = PromiseResultUpdate(*result, PROMISE_RESULT_FAIL);
@@ -492,7 +508,7 @@ static ActionResult RepairExec(EvalContext *ctx, const Attributes *a,
     }
 #endif /* !__MINGW32__ */
 
-    return ACTION_RESULT_OK;
+    return timed_out ? ACTION_RESULT_TIMEOUT : ACTION_RESULT_OK;
 }
 
 /*************************************************************/

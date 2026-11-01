@@ -26,6 +26,8 @@
 #define CFENGINE_TIMEOUT_H
 
 void SetTimeOut(int timeout);
+/* True if the alarm armed by the last SetTimeOut() has fired. */
+bool TimeOutHasFired(void);
 void TimeOut(void);
 time_t SetReferenceTime(void);
 
