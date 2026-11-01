@@ -405,6 +405,7 @@ bool LoadMountInfo(Seq *list)
     if ((pp = cf_popen(buf1, "r", true)) == NULL)
     {
         Log(LOG_LEVEL_ERR, "Can't open '%s'. (cf_popen: %s)", buf1, GetErrorStr());
+        DisarmTimeOut();
         return false;
     }
 
@@ -423,6 +424,7 @@ bool LoadMountInfo(Seq *list)
             {
                 Log(LOG_LEVEL_ERR, "Unable to read list of mounted filesystems. (fread: %s)", GetErrorStr());
                 cf_pclose(pp);
+                DisarmTimeOut();
                 free(vbuff);
                 return false;
             }
@@ -485,6 +487,7 @@ bool LoadMountInfo(Seq *list)
             Log(LOG_LEVEL_INFO, "Session failed while trying to talk to remote host");
             Log(LOG_LEVEL_INFO, "%s", vbuff);
             cf_pclose(pp);
+            DisarmTimeOut();
             free(vbuff);
             return false;
         }
