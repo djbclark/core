@@ -575,7 +575,9 @@ static bool MakeLink(EvalContext *ctx, const char *from, const char *to, const A
     {
         const char *changes_to = to;
         char *chroot_to = NULL;
-        if (ChrootChanges())
+        /* A relative target is resolved relative to the link, which is
+         * already in the chroot, so it must be kept relative. */
+        if (ChrootChanges() && IsAbsoluteFileName(to))
         {
             /* Create a copy because the next call to ToChangesChroot() will
              * overwrite the value. */

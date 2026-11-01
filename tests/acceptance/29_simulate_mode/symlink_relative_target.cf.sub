@@ -1,0 +1,14 @@
+body common control
+{
+  inputs => { "../default.sub.cf" };
+}
+
+bundle agent main
+{
+  files:
+    "$(G.testroot)/relative-target"
+      create => "true";
+
+    "$(G.testroot)/relative-link"
+      link_from => linkfrom("relative-target", "symlink");
+}
