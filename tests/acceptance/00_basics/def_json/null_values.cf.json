@@ -1,0 +1,26 @@
+{
+  "vars": {
+    "null_scalar": null,
+    "null_list": ["a", null],
+    "good_vars": "value_from_vars"
+  },
+  "variables": {
+    "null_bare": null,
+    "null_value_object": { "value": null },
+    "null_value_list": ["a", null],
+    "good_variables": "value_from_variables"
+  },
+  "classes": {
+    "null_class": null,
+    "null_class_exprs": {
+      "class_expressions": null,
+      "regular_expressions": ["any"]
+    },
+    "string_class_exprs": { "class_expressions": "any" },
+    "number_class_exprs": { "class_expressions": 1 },
+    "bool_class_exprs": { "class_expressions": true },
+    "object_class_exprs": { "class_expressions": { "k": "any" } },
+    "test_class_29665402e2b4331f10b8d767b512cd916eeb5db9": "any"
+  },
+  "inputs": ["a", null]
+}

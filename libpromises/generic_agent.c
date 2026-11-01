@@ -451,6 +451,15 @@ static bool LoadAugmentsData(EvalContext *ctx, const char *filename, const JsonE
                 JsonElement *data = JsonObjectGet(vars, vkey);
                 if (JsonGetElementType(data) == JSON_ELEMENT_TYPE_PRIMITIVE)
                 {
+                    if (JsonGetPrimitiveType(data) == JSON_PRIMITIVE_TYPE_NULL)
+                    {
+                        /* JsonPrimitiveToString() returns NULL for JSON null and
+                         * there is no scalar to install in its place. */
+                        Log(LOG_LEVEL_ERR, "Invalid value for augments variable '%s' in '%s'"
+                            " (null is not a supported value)", vkey, filename);
+                        VarRefDestroy(ref);
+                        continue;
+                    }
                     char *value = JsonPrimitiveToString(data);
                     if ((ref->ns == NULL) && (ref->scope == NULL))
                     {
@@ -603,6 +612,18 @@ static bool LoadAugmentsData(EvalContext *ctx, const char *filename, const JsonE
                 bool installed = false;
                 if (JsonGetElementType(data) == JSON_ELEMENT_TYPE_PRIMITIVE)
                 {
+                    if (JsonGetPrimitiveType(data) == JSON_PRIMITIVE_TYPE_NULL)
+                    {
+                        /* JsonPrimitiveToString() returns NULL for JSON null and
+                         * there is no scalar to install in its place. This is the
+                         * bare-value form ("key": null); {"value": null} is
+                         * already rejected above by the NULL_JSON(data) check. */
+                        Log(LOG_LEVEL_ERR, "Invalid value for augments variable '%s' in '%s'"
+                            " (null is not a supported value)", vkey, filename);
+                        VarRefDestroy(ref);
+                        StringSetDestroy(tags);
+                        continue;
+                    }
                     char *value = JsonPrimitiveToString(data);
                     if ((ref->ns == NULL) && (ref->scope == NULL))
                     {
@@ -720,6 +741,14 @@ static bool LoadAugmentsData(EvalContext *ctx, const char *filename, const JsonE
                 JsonElement *data = JsonObjectGet(classes, ckey);
                 if (JsonGetElementType(data) == JSON_ELEMENT_TYPE_PRIMITIVE)
                 {
+                    if (JsonGetPrimitiveType(data) == JSON_PRIMITIVE_TYPE_NULL)
+                    {
+                        /* JsonPrimitiveToString() returns NULL for JSON null and
+                         * there is no class expression to check in its place. */
+                        Log(LOG_LEVEL_ERR, "Invalid augments class expression for class '%s' in '%s'"
+                            " (null is not a supported value)", ckey, filename);
+                        continue;
+                    }
                     char *check = JsonPrimitiveToString(data);
                     // check if class is true
                     if (CheckContextClassmatch(ctx, check))
@@ -781,11 +810,25 @@ static bool LoadAugmentsData(EvalContext *ctx, const char *filename, const JsonE
                         continue;
                     }
 
+                    /* The check above leaves exactly one of the two in use; an
+                     * absent entry reads as JSON null, so pick the other one.
+                     * JsonIteratorInit() on a primitive is undefined, so
+                     * require a container (array or object, both of which
+                     * have always been iterated here). */
+                    const JsonElement *exprs = JSON_NOT_NULL(class_exprs) ? class_exprs : reg_exprs;
+                    if (JsonGetElementType(exprs) != JSON_ELEMENT_TYPE_CONTAINER)
+                    {
+                        Log(LOG_LEVEL_ERR, "Invalid augments class data for class '%s' in '%s':"
+                            " \"class_expressions\" and \"regular_expressions\" must be a JSON array or object",
+                            ckey, filename);
+                        continue;
+                    }
+
                     StringSet *tags = GetTagsFromAugmentsTags("class", ckey, json_tags,
                                                               "source=augments_file", filename);
                     const char *comment = GetAugmentsComment("class", ckey, filename, data);
                     bool installed = false;
-                    JsonIterator exprs_iter = JsonIteratorInit(class_exprs ? class_exprs : reg_exprs);
+                    JsonIterator exprs_iter = JsonIteratorInit(exprs);
                     const JsonElement *el;
                     while ((el = JsonIteratorNextValueByType(&exprs_iter, JSON_ELEMENT_TYPE_PRIMITIVE, true)))
                     {
