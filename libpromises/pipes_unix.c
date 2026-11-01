@@ -865,8 +865,6 @@ int cf_pclose(FILE *pp)
         return -1;
     }
 
-    ALARM_PID = -1;
-
     if (fd >= MAX_FD)
     {
         ThreadUnlock(cft_count);
@@ -888,7 +886,11 @@ int cf_pclose(FILE *pp)
             GetErrorStr());
     }
 
-    return cf_pwait(pid);
+    /* Stay registered until reaped: a command that closed its output but
+     * is still running must remain killable by TimeOut() during the wait. */
+    int ret = cf_pwait(pid);
+    ALARM_PID = -1;
+    return ret;
 }
 
 int cf_pclose_full_duplex_side(int fd)
