@@ -83,14 +83,114 @@ void StartTimeOutClock(int seconds)
 
 /*************************************************************************/
 
+/* The child last published in ALARM_PID, if it was put in a process group of
+ * its own (see cf_popen*()), else -1. Recorded at fork time because
+ * getpgid() cannot be asked later: on macOS it fails for a group leader that
+ * has exited and not been reaped, while its group lives on. */
+static pid_t TIMED_GROUP = -1; /* GLOBAL_X */
+
+void SetTimedChildGroup(pid_t pid)
+{
+    TIMED_GROUP = pid;
+}
+
+#ifndef __MINGW32__
+/* Whether pid is the timed child's group. It never is our own group, nor
+ * that of a command that was not given a group of its own, which may have
+ * made one for itself with setsid(). */
+static bool IsTimedChildGroup(pid_t pid)
+{
+    return ((pid > 1) && (pid == TIMED_GROUP) && (pid != getpid()));
+}
+
+/* Only calls what a signal handler may. */
+static void KillGroupOfTimedChild(pid_t pid)
+{
+    if (IsTimedChildGroup(pid))
+    {
+        kill(-pid, SIGKILL);
+    }
+}
+
+/* Poll for up to the given milliseconds until no process is left in the
+ * group. The leader is reaped on the way: while it is a zombie it still
+ * counts as a member, and nothing else will reap it from the handler. */
+static bool WaitForGroupToEnd(pid_t group, int milliseconds)
+{
+    const struct timespec step = { .tv_nsec = 50 * 1000 * 1000 };
+
+    for (int waited = 0; ; waited += 50)
+    {
+        waitpid(group, NULL, WNOHANG);
+        if ((kill(-group, 0) == -1) && (errno == ESRCH))
+        {
+            return true;
+        }
+        if (waited >= milliseconds)
+        {
+            return false;
+        }
+        nanosleep(&step, NULL);
+    }
+}
+
+/* Set by the first EndTimedChildGroup(), so that a signal arriving while it
+ * waits cannot make it wait again. */
+static volatile sig_atomic_t ENDING_GROUP = 0; /* GLOBAL_X */
+#endif
+
+bool EndTimedChildGroup(int signum)
+{
+#ifndef __MINGW32__
+    const pid_t group = ALARM_PID;
+
+    if (!IsTimedChildGroup(group))
+    {
+        return true;
+    }
+    if (ENDING_GROUP)
+    {
+        return false;
+    }
+    ENDING_GROUP = 1;
+
+    /* The command gets what master gave it: the signal we got, SIGTERM a
+     * second later, then SIGKILL. That ends 3 s after the signal, well
+     * before cf-execd kills the agent (6 s after its SIGINT). */
+    kill(-group, signum);
+    if (!WaitForGroupToEnd(group, 1000))
+    {
+        if (signum != SIGTERM)
+        {
+            kill(-group, SIGTERM);
+        }
+        if (!WaitForGroupToEnd(group, 2000))
+        {
+            kill(-group, SIGKILL);
+        }
+    }
+#else
+    (void) signum;
+#endif
+    return true;
+}
+
 void TimeOut()
 {
     alarm(0);
 
     if (ALARM_PID != -1)
     {
-        Log(LOG_LEVEL_VERBOSE, "Time out of process %jd", (intmax_t)ALARM_PID);
-        GracefulTerminate(ALARM_PID, PROCESS_START_TIME_UNKNOWN);
+        const pid_t pid = ALARM_PID;
+        Log(LOG_LEVEL_VERBOSE, "Time out of process %jd", (intmax_t) pid);
+
+        GracefulTerminate(pid, PROCESS_START_TIME_UNKNOWN);
+
+#ifndef __MINGW32__
+        /* Whatever the process spawned survives it and keeps its output pipe
+         * open. */
+        KillGroupOfTimedChild(pid);
+#endif
     }
     else
     {

@@ -27,6 +27,7 @@
 #include <file_lib.h>
 #include <signals.h>    /* IsPendingTermination() */
 #include <string_lib.h> /* StringToInt64() */
+#include <timeout.h>    /* SetTimedChildGroup() */
 
 #ifdef HAVE_SYS_UIO_H
 # include <sys/uio.h>
@@ -223,6 +224,7 @@ bool ShellCommandReturnsZero(const char *command, ShellType shell)
     else                        /* parent */
     {
         ALARM_PID = pid;
+        SetTimedChildGroup(-1); /* not in a group of its own */
 
         /* Poll for the child instead of blocking in waitpid(). signal() on
          * Linux/glibc installs handlers with SA_RESTART, so SIGTERM does not
