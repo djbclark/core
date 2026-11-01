@@ -199,6 +199,13 @@ static pid_t GenericCreatePipeAndFork(IOPipe *pipes)
         return -1;
     }
 
+    /* A child under a timeout leads a process group of its own, so that
+     * whatever it spawns can be terminated with it. Otherwise a descendant
+     * that outlives it keeps the pipe open and the read in the parent
+     * blocked. Only then: a child outside the terminal's foreground group is
+     * stopped by SIGTTIN when it reads the terminal. */
+    const bool own_group = (timeout > 0);
+
     pid_t pid = -1;
 
     if ((pid = fork()) == (pid_t) -1)
@@ -241,6 +248,15 @@ static pid_t GenericCreatePipeAndFork(IOPipe *pipes)
         sigset_t sigmask;
         sigemptyset(&sigmask);
         sigprocmask(SIG_SETMASK, &sigmask, NULL);
+
+        if (own_group)
+        {
+            setpgid(0, 0);
+        }
+    }
+    else if (own_group)
+    {
+        setpgid(pid, pid); /* the child may not have run yet */
     }
 
     ALARM_PID = (pid != 0 ? pid : -1);

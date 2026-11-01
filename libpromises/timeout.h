@@ -39,6 +39,9 @@ void DisarmTimeOut(void);
 int TakeChildTimeOut(void);
 void StartTimeOutClock(int seconds);
 void TimeOut(void);
+/* Pass a signal this process received on to the group of the child running
+ * under a timeout, which leads one of its own (see cf_popen*()). */
+void SignalTimedChildGroup(int signum);
 time_t SetReferenceTime(void);
 
 #endif

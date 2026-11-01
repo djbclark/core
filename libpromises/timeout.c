@@ -83,14 +83,53 @@ void StartTimeOutClock(int seconds)
 
 /*************************************************************************/
 
+#ifndef __MINGW32__
+/* Whether signalling the group of pid reaches only what it started: never
+ * our own group, and not the group of a pid that leads none (a stale pid may
+ * have been recycled for an unrelated process). */
+static bool LeadsOwnGroup(pid_t pid)
+{
+    return (pid > 1) && (pid != getpid()) && (getpgid(pid) == pid);
+}
+#endif
+
+void SignalTimedChildGroup(int signum)
+{
+#ifndef __MINGW32__
+    const pid_t pid = ALARM_PID;
+    if (LeadsOwnGroup(pid))
+    {
+        kill(-pid, signum);
+    }
+#else
+    (void) signum;
+#endif
+}
+
 void TimeOut()
 {
     alarm(0);
 
     if (ALARM_PID != -1)
     {
-        Log(LOG_LEVEL_VERBOSE, "Time out of process %jd", (intmax_t)ALARM_PID);
-        GracefulTerminate(ALARM_PID, PROCESS_START_TIME_UNKNOWN);
+        const pid_t pid = ALARM_PID;
+        Log(LOG_LEVEL_VERBOSE, "Time out of process %jd", (intmax_t) pid);
+
+#ifndef __MINGW32__
+        /* Read while the process is alive: getpgid() fails after it dies. */
+        const bool leads_group = LeadsOwnGroup(pid);
+#endif
+
+        GracefulTerminate(pid, PROCESS_START_TIME_UNKNOWN);
+
+#ifndef __MINGW32__
+        /* Whatever the process spawned survives it and keeps its output pipe
+         * open. */
+        if (leads_group)
+        {
+            kill(-pid, SIGKILL);
+        }
+#endif
     }
     else
     {
