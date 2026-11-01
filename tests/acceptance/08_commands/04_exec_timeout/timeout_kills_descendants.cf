@@ -1,0 +1,76 @@
+#######################################################
+#
+# exec_timeout must also terminate what the command spawned. A shell that is
+# terminated leaves its child running, still holding the output pipe open, and
+# the agent stays blocked reading it for as long as the child lives.
+#
+# The elapsed time is the difference between two marker files touched just
+# before and after the timed promise.
+#
+#######################################################
+body common control
+{
+  inputs => { "../../default.sub.cf" };
+  bundlesequence => { default("$(this.promise_filename)") };
+  version => "1.0";
+}
+
+#######################################################
+bundle agent init
+{
+  files:
+    "$(G.testdir)/pg_start" delete => tidy;
+    "$(G.testdir)/pg_end" delete => tidy;
+}
+
+#######################################################
+bundle agent test
+{
+  meta:
+    "description"
+      string => "exec_timeout terminates the processes a command spawned";
+
+    "test_skip_unsupported"
+      string => "windows",
+      comment => "Runs a POSIX shell payload";
+
+  commands:
+    "/bin/sh" arglist => { "-c", "touch $(G.testdir)/pg_start" };
+
+    "/bin/sh"
+      arglist => { "-c", "sleep 30; exit 0" },
+      contain => exec_timeout_2;
+
+    "/bin/sh" arglist => { "-c", "touch $(G.testdir)/pg_end" };
+}
+
+body contain exec_timeout_2
+{
+  exec_timeout => "2";
+}
+
+#######################################################
+bundle agent check
+{
+  vars:
+    "start" string => filestat("$(G.testdir)/pg_start", "mtime");
+    "end" string => filestat("$(G.testdir)/pg_end", "mtime");
+    "elapsed" string => eval("$(end) - $(start)", "math", "infix");
+
+  classes:
+    # The agent used to be blocked until the orphaned sleep exited.
+    "ok"
+      and => {
+        fileexists("$(G.testdir)/pg_start"),
+        fileexists("$(G.testdir)/pg_end"),
+        islessthan("$(elapsed)", "25"),
+      };
+
+  methods:
+    "any"
+      usebundle => dcs_passif("ok", $(this.promise_filename)),
+      inherit => "true";
+}
+
+### PROJECT_ID: core
+### CATEGORY_ID: 26

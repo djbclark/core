@@ -33,6 +33,18 @@ void SetTimeOut(int timeout)
     alarm(timeout);
 }
 
+bool TimeOutIsArmed(void)
+{
+#ifdef __MINGW32__
+    return false;
+#else
+    /* Callers disarm by restoring SIG_DFL, so the handler tells. */
+    struct sigaction current;
+    return (sigaction(SIGALRM, NULL, &current) == 0)
+        && ((void *) current.sa_handler == (void *) TimeOut);
+#endif
+}
+
 /*************************************************************************/
 
 void TimeOut()
@@ -41,8 +53,25 @@ void TimeOut()
 
     if (ALARM_PID != -1)
     {
-        Log(LOG_LEVEL_VERBOSE, "Time out of process %jd", (intmax_t)ALARM_PID);
-        GracefulTerminate(ALARM_PID, PROCESS_START_TIME_UNKNOWN);
+        const pid_t pid = ALARM_PID;
+        Log(LOG_LEVEL_VERBOSE, "Time out of process %jd", (intmax_t) pid);
+
+#ifndef __MINGW32__
+        /* Read while the process is alive: getpgid() fails after it dies. */
+        const pid_t pgid = getpgid(pid);
+#endif
+
+        GracefulTerminate(pid, PROCESS_START_TIME_UNKNOWN);
+
+#ifndef __MINGW32__
+        /* Whatever the process spawned survives it and keeps its output pipe
+         * open. Only ever signal a group the process led: if setpgid() did
+         * not take effect, -pid could name our own group. */
+        if (pgid == pid)
+        {
+            kill(-pid, SIGKILL);
+        }
+#endif
     }
     else
     {

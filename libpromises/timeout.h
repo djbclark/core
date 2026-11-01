@@ -26,6 +26,8 @@
 #define CFENGINE_TIMEOUT_H
 
 void SetTimeOut(int timeout);
+/* True while a timeout set by SetTimeOut() has not been disarmed. */
+bool TimeOutIsArmed(void);
 void TimeOut(void);
 time_t SetReferenceTime(void);
 
