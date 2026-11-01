@@ -1,0 +1,17 @@
+body common control
+{
+  inputs => { "../default.sub.cf" };
+}
+
+bundle agent main
+{
+  files:
+    "$(G.testroot)/owned-by-root"
+      create => "true",
+      perms => owner_root;
+}
+
+body perms owner_root
+{
+  owners => { "root" };
+}

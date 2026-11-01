@@ -4373,11 +4373,17 @@ bool VerifyOwner(EvalContext *ctx, const char *file, const Promise *pp, const At
         changes_file = ToChangesChroot(file);
     }
 
+    /* In simulate mode an unprivileged user can't chown to another owner
+     * in the chroot (the user is told at startup), so an EPERM counts as
+     * the change made, to keep the file in the changes. Root is not
+     * exempted: its EPERM (e.g. immutable file) is also what a real run
+     * gets, so it stays a failure. */
     if (S_ISLNK(sb->st_mode))
     {
 # ifdef HAVE_LCHOWN
         Log(LOG_LEVEL_DEBUG, "Using lchown function");
-        if (safe_lchown(changes_file, uid, gid) == -1)
+        if ((safe_lchown(changes_file, uid, gid) == -1) &&
+            !(ChrootChanges() && (getuid() != 0) && (errno == EPERM)))
         {
             RecordFailure(ctx, pp, attr, "Cannot set ownership on link '%s'. (lchown: %s)",
                           file, GetErrorStr());
@@ -4402,7 +4408,8 @@ bool VerifyOwner(EvalContext *ctx, const char *file, const Promise *pp, const At
     }
     else
     {
-        if (safe_chown(changes_file, uid, gid) == -1)
+        if ((safe_chown(changes_file, uid, gid) == -1) &&
+            !(ChrootChanges() && (getuid() != 0) && (errno == EPERM)))
         {
             RecordDenial(ctx, pp, attr, "Cannot set ownership on file '%s'. (chown: %s)",
                          file, GetErrorStr());
