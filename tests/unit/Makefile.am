@@ -100,6 +100,7 @@ check_PROGRAMS = \
 	set_domainname_test \
 	evalfunction_test \
 	eval_context_test \
+	cmdb_test \
 	regex_test \
 	lastseen_test \
 	lastseen_migration_test \

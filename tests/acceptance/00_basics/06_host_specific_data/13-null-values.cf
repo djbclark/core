@@ -1,5 +1,6 @@
 # test of the host_specific.json functionality: JSON null values are rejected
-# per entry, the rest of the CMDB data is still installed (used to crash)
+# (used to crash), every one is reported, and since one invalid entry makes
+# the loader install nothing, the good entries are not installed either
 body common control
 {
   inputs => { "../../default.sub.cf" };
@@ -37,7 +38,8 @@ bundle agent check
       string => "$(sys.cf_promises) --show-vars -f $(sys.inputdir)/promises.cf | $(G.grep) -E 'CMDB data|value_from_'";
 
     # The offending entries are reported in the order they appear in the CMDB
-    # data, the remaining variables are installed and shown by --show-vars.
+    # data, 'vars' first, then 'variables', and the file is rejected as a
+    # whole.
     "expected"
       string => concat(
         "\s*error: Invalid value in 'null_scalar'.*null is not a supported value.*",
@@ -45,13 +47,14 @@ bundle agent check
         "\s+error: Invalid value in 'null_value'.*null is not a supported value.*",
         "\s+error: Invalid value in 'null_bare'.*null is not a supported value.*",
         "\s+error: Invalid value in 'null_value_list'.*a list must not contain null.*",
-        "\s+data:variables\.good_variables\s+value_from_variables\s+source=cmdb",
-        "\s+data:variables\.good_vars\s+value_from_vars\s+source=cmdb\s*"
+        "\s+error: CMDB data file '.*host_specific\.json' has invalid entries.*installing none of its contents.*"
       );
 
   methods:
+    # value_from_vars and value_from_variables are the good entries' values:
+    # none of them may be installed.
     ""
       usebundle => dcs_passif_output(
-        $(expected), "", $(command), $(this.promise_filename)
+        $(expected), ".*value_from_.*", $(command), $(this.promise_filename)
       );
 }
