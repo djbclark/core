@@ -26,6 +26,8 @@
 #include <unistd.h>
 #include <json.h>
 #include <set.h>                /* StringSet */
+#include <sequence.h>           /* Seq */
+#include <cf3.defs.h>           /* CF_MAXVARSIZE */
 #include <string_lib.h>
 #include <known_dirs.h>         /* GetDataDir() */
 #include <var_expressions.h>    /* VarRef, StringContainsUnresolved() */
@@ -158,11 +160,9 @@ static void LogCMDBVariableScope(const char *key, const VarRef *ref)
  * Reject a single CMDB entry containing unresolved variable references,
  * naming the entry that was rejected.
  *
- * Checked per entry, rather than once for the whole section, so that one
- * offending entry does not take every other entry in the section down with
- * it -- matching the skip-and-continue idiom the rest of this file already
- * uses for other per-entry problems (an invalid variable specification, a
- * missing "value" field).
+ * Checked per entry, rather than once for the whole section, so that the
+ * log names every offending entry, not only the first one in the section
+ * (any one of them makes LoadCMDBData() install nothing from the file).
  *
  * @param entry     the entry's value, as found under key in its section
  * @param key       the entry's key, as it appears in the CMDB file
@@ -263,6 +263,54 @@ static bool JsonArrayContainsNull(const JsonElement *array)
     return false;
 }
 
+/**
+ * Why a variable cannot be installed, as far as that can be known before
+ * touching the EvalContext: everything AddCMDBVariable() or
+ * EvalContextVariablePutTagsSetWithComment() would reject.
+ *
+ * @return whether the entry's value can be installed (details are logged
+ *         otherwise)
+ */
+static bool CheckCMDBVariableValue(const char *key, const VarRef *ref,
+                                   const JsonElement *data)
+{
+    assert(key != NULL);
+    assert(ref != NULL);
+    assert(data != NULL);
+
+    if (strlen(ref->lval) > CF_MAXVARSIZE)
+    {
+        Log(LOG_LEVEL_ERR, "Invalid variable specification in CMDB data: '%s'"
+            " (the variable name exceeds the maximum length allowed, %d characters)",
+            key, CF_MAXVARSIZE);
+        return false;
+    }
+
+    if (JsonGetElementType(data) == JSON_ELEMENT_TYPE_PRIMITIVE)
+    {
+        if (JsonGetPrimitiveType(data) == JSON_PRIMITIVE_TYPE_NULL)
+        {
+            /* JsonPrimitiveToString() returns NULL for JSON null and there is
+             * no scalar to install in its place. */
+            Log(LOG_LEVEL_ERR, "Invalid value in '%s' variable specification in CMDB data"
+                " (null is not a supported value)", key);
+            return false;
+        }
+    }
+    else if ((JsonGetType(data) == JSON_TYPE_ARRAY) &&
+             JsonArrayContainsOnlyPrimitives((JsonElement *) data) &&
+             JsonArrayContainsNull(data))
+    {
+        /* RlistFromContainer() skips JSON nulls, so the resulting slist
+         * would silently be shorter than the data it came from. */
+        Log(LOG_LEVEL_ERR, "Invalid value in '%s' variable specification in CMDB data"
+            " (a list must not contain null)", key);
+        return false;
+    }
+    return true;
+}
+
+/** Install a variable that CheckCMDBVariableValue() accepted. */
 static bool AddCMDBVariable(EvalContext *ctx, const char *key, const VarRef *ref,
                             JsonElement *data, StringSet *tags, const char *comment)
 {
@@ -278,45 +326,25 @@ static bool AddCMDBVariable(EvalContext *ctx, const char *key, const VarRef *ref
     char *address = VarRefToString(ref, true);
     if (JsonGetElementType(data) == JSON_ELEMENT_TYPE_PRIMITIVE)
     {
-        if (JsonGetPrimitiveType(data) == JSON_PRIMITIVE_TYPE_NULL)
-        {
-            /* JsonPrimitiveToString() returns NULL for JSON null and there is
-             * no scalar to install in its place. */
-            Log(LOG_LEVEL_ERR, "Invalid value in '%s' variable specification in CMDB data"
-                " (null is not a supported value)", key);
-            ret = false;
-        }
-        else
-        {
-            char *value = JsonPrimitiveToString(data);
-            Log(LOG_LEVEL_VERBOSE, "Installing CMDB variable '%s=%s'",
-                address, value);
-            ret = EvalContextVariablePutTagsSetWithComment(ctx, ref, value, CF_DATA_TYPE_STRING,
-                                                           tags, comment);
-            free(value);
-        }
+        assert(JsonGetPrimitiveType(data) != JSON_PRIMITIVE_TYPE_NULL);
+        char *value = JsonPrimitiveToString(data);
+        Log(LOG_LEVEL_VERBOSE, "Installing CMDB variable '%s=%s'",
+            address, value);
+        ret = EvalContextVariablePutTagsSetWithComment(ctx, ref, value, CF_DATA_TYPE_STRING,
+                                                       tags, comment);
+        free(value);
     }
     else if ((JsonGetType(data) == JSON_TYPE_ARRAY) &&
              JsonArrayContainsOnlyPrimitives(data))
     {
-        if (JsonArrayContainsNull(data))
-        {
-            /* RlistFromContainer() skips JSON nulls, so the resulting slist
-             * would silently be shorter than the data it came from. */
-            Log(LOG_LEVEL_ERR, "Invalid value in '%s' variable specification in CMDB data"
-                " (a list must not contain null)", key);
-            ret = false;
-        }
-        else
-        {
-            // map to slist if the data only has primitives
-            Log(LOG_LEVEL_VERBOSE, "Installing CMDB slist variable '%s'", address);
-            Rlist *data_rlist = RlistFromContainer(data);
-            ret = EvalContextVariablePutTagsSetWithComment(ctx, ref,
-                                                           data_rlist, CF_DATA_TYPE_STRING_LIST,
-                                                           tags, comment);
-            RlistDestroy(data_rlist);
-        }
+        assert(!JsonArrayContainsNull(data));
+        // map to slist if the data only has primitives
+        Log(LOG_LEVEL_VERBOSE, "Installing CMDB slist variable '%s'", address);
+        Rlist *data_rlist = RlistFromContainer(data);
+        ret = EvalContextVariablePutTagsSetWithComment(ctx, ref,
+                                                       data_rlist, CF_DATA_TYPE_STRING_LIST,
+                                                       tags, comment);
+        RlistDestroy(data_rlist);
     }
     else
     {
@@ -337,8 +365,94 @@ static bool AddCMDBVariable(EvalContext *ctx, const char *key, const VarRef *ref
     return ret;
 }
 
-static bool ReadCMDBVars(EvalContext *ctx, JsonElement *vars,
-                         const char *file_path)
+/*
+ * The CMDB file is loaded in two steps. First every entry of every section is
+ * validated and prepared, without touching the EvalContext; only if all of
+ * them are fine is anything installed. A host-specific file is one document
+ * written by one author, so a single bad entry means the file as a whole
+ * cannot be trusted, and installing only the entries around it could leave
+ * policy running without data it expects to guard it (see LoadCMDBData()).
+ */
+typedef struct
+{
+    const char *key;            /* borrowed from the JSON document */
+    VarRef *ref;                /* owned */
+    JsonElement *data;          /* borrowed from the JSON document */
+    StringSet *tags;            /* owned until installed */
+    const char *comment;        /* borrowed from the JSON document, or NULL */
+} CMDBPendingVariable;
+
+typedef struct
+{
+    const char *key;            /* borrowed from the JSON document */
+    StringSet *tags;            /* owned until installed */
+    const char *comment;        /* borrowed from the JSON document, or NULL */
+} CMDBPendingClass;
+
+typedef struct
+{
+    Seq *variables;             /* CMDBPendingVariable *, in install order */
+    Seq *classes;               /* CMDBPendingClass *, in install order */
+} CMDBPending;
+
+static void CMDBPendingVariableDestroy(void *item)
+{
+    CMDBPendingVariable *var = item;
+    VarRefDestroy(var->ref);
+    StringSetDestroy(var->tags);
+    free(var);
+}
+
+static void CMDBPendingClassDestroy(void *item)
+{
+    CMDBPendingClass *cls = item;
+    StringSetDestroy(cls->tags);
+    free(cls);
+}
+
+static CMDBPending CMDBPendingNew(void)
+{
+    return (CMDBPending) {
+        .variables = SeqNew(16, CMDBPendingVariableDestroy),
+        .classes = SeqNew(16, CMDBPendingClassDestroy),
+    };
+}
+
+static void CMDBPendingDestroy(CMDBPending *pending)
+{
+    SeqDestroy(pending->variables);
+    SeqDestroy(pending->classes);
+}
+
+/** Takes ownership of ref and tags. */
+static void CMDBPendingAddVariable(CMDBPending *pending, const char *key,
+                                   VarRef *ref, JsonElement *data,
+                                   StringSet *tags, const char *comment)
+{
+    CMDBPendingVariable *var = xmalloc(sizeof(*var));
+    *var = (CMDBPendingVariable) {
+        .key = key, .ref = ref, .data = data, .tags = tags, .comment = comment,
+    };
+    SeqAppend(pending->variables, var);
+}
+
+/** Takes ownership of tags. */
+static void CMDBPendingAddClass(CMDBPending *pending, const char *key,
+                                StringSet *tags, const char *comment)
+{
+    CMDBPendingClass *cls = xmalloc(sizeof(*cls));
+    *cls = (CMDBPendingClass) { .key = key, .tags = tags, .comment = comment };
+    SeqAppend(pending->classes, cls);
+}
+
+/**
+ * Validate the 'vars' section.
+ *
+ * @return false if the section or any entry in it is invalid. Every entry is
+ *         looked at regardless, so that all problems are logged in one go.
+ */
+static bool PrepareCMDBVars(JsonElement *vars, const char *file_path,
+                            CMDBPending *pending)
 {
     assert(vars != NULL);
 
@@ -350,6 +464,7 @@ static bool ReadCMDBVars(EvalContext *ctx, JsonElement *vars,
         return false;
     }
 
+    bool all_valid = true;
     JsonIterator iter = JsonIteratorInit(vars);
     while (JsonIteratorHasMore(&iter))
     {
@@ -358,32 +473,40 @@ static bool ReadCMDBVars(EvalContext *ctx, JsonElement *vars,
 
         if (!CheckCMDBEntryForUnexpandedVars(data, key, "vars", file_path))
         {
+            all_valid = false;
             continue;
         }
 
         VarRef *ref = GetCMDBVariableRef(key);
         if (ref == NULL)
         {
+            all_valid = false;
+            continue;
+        }
+
+        if (!CheckCMDBVariableValue(key, ref, data))
+        {
+            VarRefDestroy(ref);
+            all_valid = false;
             continue;
         }
 
         StringSet *tags = StringSetNew();
         StringSetAdd(tags, xstrdup(CMDB_SOURCE_TAG));
-        bool ret = AddCMDBVariable(ctx, key, ref, data, tags, NULL);
-        VarRefDestroy(ref);
-        if (!ret)
-        {
-            /* Details should have been logged already. */
-            Log(LOG_LEVEL_ERR, "Failed to add CMDB variable '%s'", key);
-        }
+        CMDBPendingAddVariable(pending, key, ref, data, tags, NULL);
     }
-    return true;
+    return all_valid;
 }
 
+/**
+ * Read the tags of an entry; *valid is cleared if they are malformed. The
+ * returned set is never NULL and always has default_tag in it.
+ */
 static StringSet *GetTagsFromJsonTags(const char *item_type,
                                       const char *key,
                                       const JsonElement *json_tags,
-                                      const char *default_tag)
+                                      const char *default_tag,
+                                      bool *valid)
 {
     StringSet *tags = NULL;
     if (JSON_NOT_NULL(json_tags))
@@ -395,6 +518,7 @@ static StringSet *GetTagsFromJsonTags(const char *item_type,
                 "Invalid json_tags information for %s '%s' in CMDB data:"
                 " must be a JSON array of strings",
                 item_type, key);
+            *valid = false;
         }
         else
         {
@@ -405,6 +529,7 @@ static StringSet *GetTagsFromJsonTags(const char *item_type,
                     "Invalid json_tags information %s '%s' in CMDB data:"
                     " must be a JSON array of strings",
                     item_type, key);
+                *valid = false;
             }
         }
     }
@@ -417,8 +542,10 @@ static StringSet *GetTagsFromJsonTags(const char *item_type,
     return tags;
 }
 
+/** Read the comment of an entry; *valid is cleared if it is not a string. */
 static inline const char *GetCMDBComment(const char *item_type, const char *identifier,
-                                         const JsonElement *json_object)
+                                         const JsonElement *json_object,
+                                         bool *valid)
 {
     assert(JsonGetType(json_object) == JSON_TYPE_OBJECT);
 
@@ -433,15 +560,19 @@ static inline const char *GetCMDBComment(const char *item_type, const char *iden
         Log(LOG_LEVEL_ERR,
             "Invalid type of the 'comment' field for the '%s' %s in CMDB data, must be a string",
             identifier, item_type);
+        *valid = false;
         return NULL;
     }
 
     return JsonPrimitiveGetAsString(json_comment);
 }
 
-/** Uses the new format allowing metadata (CFE-3633) */
-static bool ReadCMDBVariables(EvalContext *ctx, JsonElement *variables,
-                              const char *file_path)
+/**
+ * Validate the 'variables' section, which uses the new format allowing
+ * metadata (CFE-3633). Same contract as PrepareCMDBVars().
+ */
+static bool PrepareCMDBVariables(JsonElement *variables, const char *file_path,
+                                 CMDBPending *pending)
 {
     assert(variables != NULL);
 
@@ -453,6 +584,7 @@ static bool ReadCMDBVariables(EvalContext *ctx, JsonElement *variables,
         return false;
     }
 
+    bool all_valid = true;
     JsonIterator iter = JsonIteratorInit(variables);
     while (JsonIteratorHasMore(&iter))
     {
@@ -461,18 +593,21 @@ static bool ReadCMDBVariables(EvalContext *ctx, JsonElement *variables,
 
         if (!CheckCMDBEntryForUnexpandedVars(var_info, key, "variables", file_path))
         {
+            all_valid = false;
             continue;
         }
 
         VarRef *ref = GetCMDBVariableRef(key);
         if (ref == NULL)
         {
+            all_valid = false;
             continue;
         }
 
         JsonElement *data;
         StringSet *tags;
         const char *comment = NULL;
+        bool entry_valid = true;
 
         if (JsonGetType(var_info) == JSON_TYPE_OBJECT)
         {
@@ -482,30 +617,59 @@ static bool ReadCMDBVariables(EvalContext *ctx, JsonElement *variables,
             {
                 Log(LOG_LEVEL_ERR, "Missing value in '%s' variable specification in CMDB data (value field is required)", key);
                 VarRefDestroy(ref);
+                all_valid = false;
                 continue;
             }
 
             JsonElement *json_tags = JsonObjectGet(var_info, CMDB_VARIABLES_TAGS);
-            tags = GetTagsFromJsonTags("variable", key, json_tags, CMDB_SOURCE_TAG);
-            comment = GetCMDBComment("variable", key, var_info);
+            tags = GetTagsFromJsonTags("variable", key, json_tags, CMDB_SOURCE_TAG, &entry_valid);
+            comment = GetCMDBComment("variable", key, var_info, &entry_valid);
         }
         else
         {
             // Just a bare value, like in "vars", no metadata
             data = var_info;
-            tags = GetTagsFromJsonTags("variable", key, NULL, CMDB_SOURCE_TAG);
+            tags = GetTagsFromJsonTags("variable", key, NULL, CMDB_SOURCE_TAG, &entry_valid);
         }
 
         assert(tags != NULL);
         assert(data != NULL);
 
-        bool ret = AddCMDBVariable(ctx, key, ref, data, tags, comment);
-        VarRefDestroy(ref);
-        if (!ret)
+        if (!entry_valid || !CheckCMDBVariableValue(key, ref, data))
         {
-            /* Details should have been logged already. */
-            Log(LOG_LEVEL_ERR, "Failed to add CMDB variable '%s'", key);
+            StringSetDestroy(tags);
+            VarRefDestroy(ref);
+            all_valid = false;
+            continue;
         }
+
+        CMDBPendingAddVariable(pending, key, ref, data, tags, comment);
+    }
+    return all_valid;
+}
+
+/** Split a class key the way AddCMDBClass() does: "ns:name" or "name". */
+static const char *CMDBClassNameOfKey(const char *key)
+{
+    const char *sep = strchr(key, ':');
+    return (sep == NULL) ? key : (sep + 1);
+}
+
+/** Does EvalContextClassPutTagsSet() have a name it can work with? */
+static bool CheckCMDBClassName(const char *key)
+{
+    const char *name = CMDBClassNameOfKey(key);
+    if (name[0] == '\0')
+    {
+        Log(LOG_LEVEL_ERR, "Invalid CMDB class '%s': the class name is empty", key);
+        return false;
+    }
+    if (strlen(name) >= CF_MAXVARSIZE)
+    {
+        Log(LOG_LEVEL_ERR,
+            "Invalid CMDB class '%s': the class name is equal or longer than %d characters",
+            key, CF_MAXVARSIZE);
+        return false;
     }
     return true;
 }
@@ -544,8 +708,11 @@ static bool AddCMDBClass(EvalContext *ctx, const char *key, StringSet *tags, con
     return ret;
 }
 
-static bool ReadCMDBClasses(EvalContext *ctx, JsonElement *classes,
-                            const char *file_path)
+/**
+ * Validate the 'classes' section. Same contract as PrepareCMDBVars().
+ */
+static bool PrepareCMDBClasses(JsonElement *classes, const char *file_path,
+                               CMDBPending *pending)
 {
     assert(classes != NULL);
 
@@ -557,16 +724,22 @@ static bool ReadCMDBClasses(EvalContext *ctx, JsonElement *classes,
         return false;
     }
 
+    bool all_valid = true;
     JsonIterator iter = JsonIteratorInit(classes);
     while (JsonIteratorHasMore(&iter))
     {
         const char *key = JsonIteratorNextKey(&iter);
         JsonElement *data = JsonObjectGet(classes, key);
 
-        if (!CheckCMDBEntryForUnexpandedVars(data, key, "classes", file_path))
+        if (!CheckCMDBEntryForUnexpandedVars(data, key, "classes", file_path) ||
+            !CheckCMDBClassName(key))
         {
+            all_valid = false;
             continue;
         }
+
+        StringSet *tags = NULL;
+        const char *comment = NULL;
 
         if (JsonGetElementType(data) == JSON_ELEMENT_TYPE_PRIMITIVE)
         {
@@ -575,38 +748,33 @@ static bool ReadCMDBClasses(EvalContext *ctx, JsonElement *classes,
             {
                 Log(LOG_LEVEL_ERR,
                     "Invalid class specification '%s' in CMDB data, only \"any::\" allowed", expr);
+                all_valid = false;
                 continue;
             }
 
-            StringSet *default_tags = StringSetNew();
-            StringSetAdd(default_tags, xstrdup(CMDB_SOURCE_TAG));
-            bool ret = AddCMDBClass(ctx, key, default_tags, NULL);
-            if (!ret)
-            {
-                /* It does not have to be and error, it could be a result of
-                 * the class already existing. Anyways, details about
-                 * potential errors should have been logged already. */
-                Log(LOG_LEVEL_DEBUG, "Did not add CMDB class '%s'", key);
-            }
+            tags = StringSetNew();
+            StringSetAdd(tags, xstrdup(CMDB_SOURCE_TAG));
         }
         else if (JsonGetContainerType(data) == JSON_CONTAINER_TYPE_ARRAY &&
                  JsonArrayContainsOnlyPrimitives(data))
         {
+            bool array_valid = true;
             switch (JsonLength(data))
             {
             case 0:
                 Log(LOG_LEVEL_ERR,
                     "Empty class specification '[]' in CMDB data not allowed, only '[\"any::\"]'");
-                continue;;
+                array_valid = false;
+                break;
             case 1:
                 if (!StringEqual(JsonPrimitiveGetAsString(JsonArrayGet(data, 0)), "any::"))
                 {
                     Log(LOG_LEVEL_ERR,
                         "Invalid class specification '[\"%s\"]' in CMDB data, only '[\"any::\"]' allowed",
                         JsonPrimitiveGetAsString(JsonArrayGet(data, 0)));
-                    continue;
+                    array_valid = false;
                 }
-                // All good :)
+                // else all good :)
                 break;
             default:
                 {
@@ -617,18 +785,17 @@ static bool ReadCMDBClasses(EvalContext *ctx, JsonElement *classes,
                         StringWriterData(str));
                     WriterClose(str);
                 }
+                array_valid = false;
+                break;
+            }
+            if (!array_valid)
+            {
+                all_valid = false;
                 continue;
             }
-            StringSet *default_tags = StringSetNew();
-            StringSetAdd(default_tags, xstrdup(CMDB_SOURCE_TAG));
-            bool ret = AddCMDBClass(ctx, key, default_tags, NULL);
-            if (!ret)
-            {
-                /* It does not have to be and error, it could be a result of
-                 * the class already existing. Anyways, details about
-                 * potential errors should have been logged already. */
-                Log(LOG_LEVEL_DEBUG, "Did not add CMDB class '%s'", key);
-            }
+
+            tags = StringSetNew();
+            StringSetAdd(tags, xstrdup(CMDB_SOURCE_TAG));
         }
         else if (JsonGetContainerType(data) == JSON_CONTAINER_TYPE_OBJECT)
         {
@@ -645,6 +812,7 @@ static bool ReadCMDBClasses(EvalContext *ctx, JsonElement *classes,
                 Log(LOG_LEVEL_ERR,
                     "Invalid class expression rules for class '%s' in CMDB data,"
                     " only '[]' or '[\"any::\"]' allowed", key);
+                all_valid = false;
                 continue;
             }
             if (JSON_NOT_NULL(reg_exprs) &&
@@ -656,28 +824,90 @@ static bool ReadCMDBClasses(EvalContext *ctx, JsonElement *classes,
                 Log(LOG_LEVEL_ERR,
                     "Invalid regular expression rules for class '%s' in CMDB data,"
                     " only '[]' or '[\"any\"]' allowed", key);
+                all_valid = false;
                 continue;
             }
 
-            StringSet *tags = GetTagsFromJsonTags("class", key, json_tags, CMDB_SOURCE_TAG);
-            const char *comment = GetCMDBComment("class", key, data);
-            bool ret = AddCMDBClass(ctx, key, tags, comment);
-            if (!ret)
+            bool entry_valid = true;
+            tags = GetTagsFromJsonTags("class", key, json_tags, CMDB_SOURCE_TAG, &entry_valid);
+            comment = GetCMDBComment("class", key, data, &entry_valid);
+            if (!entry_valid)
             {
-                /* It does not have to be and error, it could be a result of
-                 * the class already existing. Anyways, details about
-                 * potential errors should have been logged already. */
-                Log(LOG_LEVEL_DEBUG, "Did not add CMDB class '%s'", key);
+                StringSetDestroy(tags);
+                all_valid = false;
+                continue;
             }
         }
         else
         {
             Log(LOG_LEVEL_ERR, "Invalid CMDB class data for class '%s'", key);
+            all_valid = false;
+            continue;
         }
+
+        CMDBPendingAddClass(pending, key, tags, comment);
     }
-    return true;
+    return all_valid;
 }
 
+/**
+ * Install what PrepareCMDB*() accepted. Everything that can make an
+ * installation fail has been checked by then, except for one case: a class
+ * that already exists is not an error and is left as it is.
+ *
+ * @return false if a variable could not be installed after all (details are
+ *         logged); that would be a gap in the validation
+ */
+static bool InstallCMDBPending(EvalContext *ctx, CMDBPending *pending)
+{
+    bool success = true;
+
+    for (size_t i = 0; i < SeqLength(pending->variables); i++)
+    {
+        CMDBPendingVariable *var = SeqAt(pending->variables, i);
+        bool ret = AddCMDBVariable(ctx, var->key, var->ref, var->data,
+                                   var->tags, var->comment);
+        var->tags = NULL;       /* consumed or destroyed by AddCMDBVariable() */
+        if (!ret)
+        {
+            /* Details should have been logged already. */
+            Log(LOG_LEVEL_ERR, "Failed to add CMDB variable '%s'", var->key);
+            success = false;
+        }
+    }
+
+    for (size_t i = 0; i < SeqLength(pending->classes); i++)
+    {
+        CMDBPendingClass *cls = SeqAt(pending->classes, i);
+        bool ret = AddCMDBClass(ctx, cls->key, cls->tags, cls->comment);
+        cls->tags = NULL;       /* consumed or destroyed by AddCMDBClass() */
+        if (!ret)
+        {
+            /* It does not have to be and error, it could be a result of
+             * the class already existing. Anyways, details about
+             * potential errors should have been logged already. */
+            Log(LOG_LEVEL_DEBUG, "Did not add CMDB class '%s'", cls->key);
+        }
+    }
+    return success;
+}
+
+/**
+ * Load host_specific.json into the EvalContext, all or nothing.
+ *
+ * If the file is there but anything in it is unusable (unreadable, not
+ * valid JSON, not an object, a section of the wrong type, or any single
+ * entry of 'vars', 'variables' or 'classes' that cannot be validated or
+ * installed), nothing at all is installed from it, every problem found is
+ * logged, and false is returned. A policy that guards an action by data it
+ * reads from this file (an interlock that blocks a service, say) must not
+ * see the file half-loaded: the guard's entry could be exactly the one
+ * dropped, and the action would then run unguarded.
+ *
+ * An absent file is not an error. A top-level key other than 'vars',
+ * 'variables' and 'classes' is only warned about and skipped; it holds no
+ * data this loader knows how to install.
+ */
 bool LoadCMDBData(EvalContext *ctx)
 {
     char file_path[PATH_MAX] = {0};
@@ -708,7 +938,7 @@ bool LoadCMDBData(EvalContext *ctx)
         return false;
     }
 
-    Log(LOG_LEVEL_VERBOSE, "Loaded CMDB data file '%s', installing contents", file_path);
+    Log(LOG_LEVEL_VERBOSE, "Loaded CMDB data file '%s', validating contents", file_path);
 
     JsonIterator iter = JsonIteratorInit(data);
     while (JsonIteratorHasMore(&iter))
@@ -722,25 +952,43 @@ bool LoadCMDBData(EvalContext *ctx)
         }
     }
 
-    bool success = true;
+    /* Step 1: validate everything, install nothing. Every section is
+     * looked at even after a failure, so the log names every bad entry. */
+    CMDBPending pending = CMDBPendingNew();
+    bool valid = true;
     JsonElement *vars = JsonObjectGet(data, "vars");
-    if (JSON_NOT_NULL(vars) && !ReadCMDBVars(ctx, vars, file_path))
+    if (JSON_NOT_NULL(vars) && !PrepareCMDBVars(vars, file_path, &pending))
     {
-        success = false;
+        valid = false;
     }
     /* Uses the new format allowing metadata (CFE-3633) */
     JsonElement *variables = JsonObjectGet(data, "variables");
     if (JSON_NOT_NULL(variables) &&
-        !ReadCMDBVariables(ctx, variables, file_path))
+        !PrepareCMDBVariables(variables, file_path, &pending))
     {
-        success = false;
+        valid = false;
     }
     JsonElement *classes = JsonObjectGet(data, "classes");
-    if (JSON_NOT_NULL(classes) && !ReadCMDBClasses(ctx, classes, file_path))
+    if (JSON_NOT_NULL(classes) && !PrepareCMDBClasses(classes, file_path, &pending))
     {
-        success = false;
+        valid = false;
     }
 
+    /* Step 2: install, but only if the whole file is good. */
+    bool success = false;
+    if (valid)
+    {
+        Log(LOG_LEVEL_VERBOSE, "Installing contents of CMDB data file '%s'", file_path);
+        success = InstallCMDBPending(ctx, &pending);
+    }
+    else
+    {
+        Log(LOG_LEVEL_ERR,
+            "CMDB data file '%s' has invalid entries (see above), installing none of its contents",
+            file_path);
+    }
+
+    CMDBPendingDestroy(&pending);
     JsonDestroy(data);
     return success;
 }

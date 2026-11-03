@@ -1,5 +1,6 @@
-# test that one entry with an unresolved variable reference does not drop
-# every other entry in the same section
+# test that one entry with an unresolved variable reference makes the CMDB
+# loader install nothing from host_specific.json: the file is all or nothing,
+# so no entry can be left behind without the entry that was meant to guard it
 body common control
 {
   inputs => { "../../default.sub.cf" };
@@ -48,22 +49,30 @@ bundle agent check
       depends_on => { "prepare_host_specific_data" };
 
   classes:
-    # The offending entry is still rejected and named.
+    # The offending entry is rejected and named.
     "offender_named"
       expression => regcmp(
         ".*error: Invalid 'vars' CMDB data in '.*host_specific\.json', cannot contain variable references \(offending value in entry 'key_with_unresolved_value': .*",
         "$(error_output)"
       );
 
-    # Its sibling entry in the same section is installed anyway -- a single
-    # bad entry must not take the rest of the section down with it.
-    "good_entry_survived"
+    # The loader says that it installed none of the file.
+    "nothing_installed_reported"
       expression => regcmp(
-        "data:variables\.good_key\s+a literal value\s+source=cmdb",
+        ".*error: CMDB data file '.*host_specific\.json' has invalid entries \(see above\), installing none of its contents.*",
+        "$(error_output)"
+      );
+
+    # Its sibling entry in the same section is NOT installed: a single bad
+    # entry takes the whole file down, so that policy never runs with only
+    # part of the data it was written against.
+    "good_entry_absent"
+      not => regcmp(
+        ".*good_key.*",
         "$(vars_output)"
       );
 
-    "ok" and => { "offender_named", "good_entry_survived" };
+    "ok" and => { "offender_named", "nothing_installed_reported", "good_entry_absent" };
 
   reports:
     ok::
