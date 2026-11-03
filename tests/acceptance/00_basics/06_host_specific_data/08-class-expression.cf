@@ -1,4 +1,5 @@
-# basic test of the host_specific.json functionality: 'classes' object with a tag and a comment
+# test of the host_specific.json functionality: an invalid 'class_expressions'
+# rule is reported and the whole file is rejected (all or nothing)
 body common control
 {
   inputs => { "../../default.sub.cf" };
@@ -38,8 +39,10 @@ bundle agent check
   methods:
     ""
       usebundle => dcs_passif_output(
-        "\s*error: Invalid class expression rules for class 'ns1:test_class1'.*\s+ns2:test_class2\s+.*",
-        "",
+        "\s*error: Invalid class expression rules for class 'ns1:test_class1'.*",
+        # the invalid entry makes the loader install nothing, so the valid
+        # class next to it is not defined either
+        ".*\s+ns2:test_class2\s+.*",
         $(command),
         $(this.promise_filename)
       );
