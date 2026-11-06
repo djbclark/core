@@ -47,6 +47,8 @@
 #define CMDB_CLASSES_REGULAR_EXPRESSIONS "regular_expressions"
 #define CMDB_COMMENT_KEY "comment"
 
+bool (*CMDBTestFailInsertion)(const char *key) = NULL;
+
 JsonElement *ReadJsonFile(const char *filename, LogLevel log_level, size_t size_max)
 {
     assert(filename != NULL);
@@ -216,8 +218,31 @@ static bool CheckCMDBEntryForUnexpandedVars(JsonElement *entry,
     }
     return false;
 }
+
+/**
+ * Turn a CMDB key into the variable it installs, or NULL (logged) if the key
+ * is not a variable this loader can install.
+ *
+ * The key's syntax is checked here, before VarRefParse(): that function
+ * answers a malformed key with a log message and a usable reference to
+ * something else ('tendcf_interlock[' becomes 'tendcf_interlock'), which
+ * would let an entry silently replace another one. A CMDB key is a variable
+ * name, so it holds no index brackets at all.
+ *
+ * Special scopes are refused too, except 'def': 'this', 'body' and 'edit' name
+ * tables that exist only while a promise, body or bundle is being evaluated,
+ * and 'sys', 'const', 'mon' and 'match' take no namespace, but every CMDB
+ * variable is given one.
+ */
 static VarRef *GetCMDBVariableRef(const char *key)
 {
+    if (strpbrk(key, "[]") != NULL)
+    {
+        Log(LOG_LEVEL_ERR, "Invalid variable specification in CMDB data: '%s'"
+            " (a variable name cannot contain '[' or ']')", key);
+        return NULL;
+    }
+
     VarRef *ref = VarRefParse(key);
     if (ref->ns == NULL)
     {
@@ -240,6 +265,15 @@ static VarRef *GetCMDBVariableRef(const char *key)
     }
     else
     {
+        const SpecialScope special = SpecialScopeFromString(ref->scope);
+        if (special != SPECIAL_SCOPE_NONE && special != SPECIAL_SCOPE_DEF)
+        {
+            Log(LOG_LEVEL_ERR, "Invalid variable specification in CMDB data: '%s'"
+                " (the '%s' scope cannot be set from CMDB data)", key, ref->scope);
+            VarRefDestroy(ref);
+            return NULL;
+        }
+
         /* The key contained a dot, so the variable did not land in the
          * default scope. Tell the operator where it went instead. */
         LogCMDBVariableScope(key, ref);
@@ -320,6 +354,13 @@ static bool AddCMDBVariable(EvalContext *ctx, const char *key, const VarRef *ref
     assert(data != NULL);
     assert(tags != NULL);
 
+    if (CMDBTestFailInsertion != NULL && CMDBTestFailInsertion(key))
+    {
+        Log(LOG_LEVEL_ERR, "Variable '%s' cannot be added (insertion failure forced by a test)", key);
+        StringSetDestroy(tags);
+        return false;
+    }
+
     bool ret;
     /* Not '%s:%s.%s' of ref->ns, ref->scope and key: a key that names a scope
      * already contains that scope, which would then be printed twice. */
@@ -387,6 +428,7 @@ typedef struct
     const char *key;            /* borrowed from the JSON document */
     StringSet *tags;            /* owned until installed */
     const char *comment;        /* borrowed from the JSON document, or NULL */
+    bool installed;             /* set by InstallCMDBPending() */
 } CMDBPendingClass;
 
 typedef struct
@@ -422,6 +464,58 @@ static void CMDBPendingDestroy(CMDBPending *pending)
 {
     SeqDestroy(pending->variables);
     SeqDestroy(pending->classes);
+}
+
+/**
+ * Refuse two entries that name the same variable (also across sections and
+ * spellings: 'x', 'data:variables.x' and 'variables.x' are one variable): the
+ * later would replace the earlier one, so an entry could silently take the
+ * place of the one a policy relies on.
+ *
+ * @return false (logged) if any variable is named more than once
+ */
+static bool CMDBPendingCheckNoDuplicates(const CMDBPending *pending)
+{
+    bool valid = true;
+    StringSet *seen = StringSetNew();
+    for (size_t i = 0; i < SeqLength(pending->variables); i++)
+    {
+        const CMDBPendingVariable *var = SeqAt(pending->variables, i);
+        char *address = VarRefToString(var->ref, true);
+        if (StringSetContains(seen, address))
+        {
+            Log(LOG_LEVEL_ERR,
+                "Invalid variable specification in CMDB data: '%s' names the variable '%s'"
+                " that another entry names too", var->key, address);
+            valid = false;
+            free(address);
+        }
+        else
+        {
+            StringSetAdd(seen, address); /* takes ownership */
+        }
+    }
+    StringSetDestroy(seen);
+    return valid;
+}
+
+/**
+ * Is rules an array that is empty or holds just the string 'allowed'? The
+ * element's type is checked before its value is read.
+ */
+static bool CheckCMDBRuleArray(const JsonElement *rules, const char *allowed)
+{
+    if (JsonGetType(rules) != JSON_TYPE_ARRAY || JsonLength(rules) > 1)
+    {
+        return false;
+    }
+    if (JsonLength(rules) == 0)
+    {
+        return true;
+    }
+    const JsonElement *rule = JsonArrayGet(rules, 0);
+    return (JsonGetType(rule) == JSON_TYPE_STRING &&
+            StringEqual(JsonPrimitiveGetAsString(rule), allowed));
 }
 
 /** Takes ownership of ref and tags. */
@@ -804,10 +898,7 @@ static bool PrepareCMDBClasses(JsonElement *classes, const char *file_path,
             const JsonElement *json_tags = JsonObjectGet(data, CMDB_CLASSES_TAGS);
 
             if (JSON_NOT_NULL(class_exprs) &&
-                (JsonGetType(class_exprs) != JSON_TYPE_ARRAY ||
-                 JsonLength(class_exprs) > 1 ||
-                 (JsonLength(class_exprs) == 1 &&
-                  !StringEqual(JsonPrimitiveGetAsString(JsonArrayGet(class_exprs, 0)), "any::"))))
+                !CheckCMDBRuleArray(class_exprs, "any::"))
             {
                 Log(LOG_LEVEL_ERR,
                     "Invalid class expression rules for class '%s' in CMDB data,"
@@ -816,10 +907,7 @@ static bool PrepareCMDBClasses(JsonElement *classes, const char *file_path,
                 continue;
             }
             if (JSON_NOT_NULL(reg_exprs) &&
-                (JsonGetType(reg_exprs) != JSON_TYPE_ARRAY ||
-                 JsonLength(reg_exprs) > 1 ||
-                 (JsonLength(reg_exprs) == 1 &&
-                  !StringEqual(JsonPrimitiveGetAsString(JsonArrayGet(reg_exprs, 0)), "any"))))
+                !CheckCMDBRuleArray(reg_exprs, "any"))
             {
                 Log(LOG_LEVEL_ERR,
                     "Invalid regular expression rules for class '%s' in CMDB data,"
@@ -851,16 +939,72 @@ static bool PrepareCMDBClasses(JsonElement *classes, const char *file_path,
 }
 
 /**
+ * Take back what InstallCMDBPending() installed so far: the first
+ * variables_installed variables and every class marked installed. A class
+ * that was already there was not installed by this load and is left alone.
+ */
+static void RollbackCMDBPending(EvalContext *ctx, CMDBPending *pending,
+                                size_t variables_installed)
+{
+    for (size_t i = 0; i < variables_installed; i++)
+    {
+        const CMDBPendingVariable *var = SeqAt(pending->variables, i);
+        EvalContextVariableRemove(ctx, var->ref);
+    }
+
+    for (size_t i = 0; i < SeqLength(pending->classes); i++)
+    {
+        const CMDBPendingClass *cls = SeqAt(pending->classes, i);
+        if (!cls->installed)
+        {
+            continue;
+        }
+
+        /* Split the key and name the class the way AddCMDBClass() put it */
+        char *ns = NULL;
+        const char *name = cls->key;
+        const char *sep = strchr(cls->key, ':');
+        if (sep != NULL)
+        {
+            ns = xstrndup(cls->key, sep - cls->key);
+            name = sep + 1;
+        }
+        char *canonical = CanonifyName(name);
+        EvalContextClassRemove(ctx, (ns != NULL) ? ns : CMDB_NAMESPACE, canonical);
+        free(canonical);
+        free(ns);
+    }
+}
+
+/**
  * Install what PrepareCMDB*() accepted. Everything that can make an
  * installation fail has been checked by then, except for one case: a class
  * that already exists is not an error and is left as it is.
  *
+ * All or nothing in its own right, should the validation have a gap: at the
+ * first variable that cannot be installed, everything this call installed is
+ * removed again and false is returned.
+ *
  * @return false if a variable could not be installed after all (details are
- *         logged); that would be a gap in the validation
+ *         logged); nothing is left installed then
  */
 static bool InstallCMDBPending(EvalContext *ctx, CMDBPending *pending)
 {
-    bool success = true;
+    /* Classes first: they cannot fail, and installing them before the
+     * variables lets a failing variable exercise the rollback of both. */
+    for (size_t i = 0; i < SeqLength(pending->classes); i++)
+    {
+        CMDBPendingClass *cls = SeqAt(pending->classes, i);
+        cls->installed = AddCMDBClass(ctx, cls->key, cls->tags, cls->comment);
+        cls->tags = NULL;       /* consumed or destroyed by AddCMDBClass() */
+        if (!cls->installed)
+        {
+            /* It does not have to be and error, it could be a result of
+             * the class already existing. Anyways, details about
+             * potential errors should have been logged already. */
+            Log(LOG_LEVEL_DEBUG, "Did not add CMDB class '%s'", cls->key);
+        }
+    }
 
     for (size_t i = 0; i < SeqLength(pending->variables); i++)
     {
@@ -871,25 +1015,14 @@ static bool InstallCMDBPending(EvalContext *ctx, CMDBPending *pending)
         if (!ret)
         {
             /* Details should have been logged already. */
-            Log(LOG_LEVEL_ERR, "Failed to add CMDB variable '%s'", var->key);
-            success = false;
+            Log(LOG_LEVEL_ERR,
+                "Failed to add CMDB variable '%s', removing what was installed from the file",
+                var->key);
+            RollbackCMDBPending(ctx, pending, i);
+            return false;
         }
     }
-
-    for (size_t i = 0; i < SeqLength(pending->classes); i++)
-    {
-        CMDBPendingClass *cls = SeqAt(pending->classes, i);
-        bool ret = AddCMDBClass(ctx, cls->key, cls->tags, cls->comment);
-        cls->tags = NULL;       /* consumed or destroyed by AddCMDBClass() */
-        if (!ret)
-        {
-            /* It does not have to be and error, it could be a result of
-             * the class already existing. Anyways, details about
-             * potential errors should have been logged already. */
-            Log(LOG_LEVEL_DEBUG, "Did not add CMDB class '%s'", cls->key);
-        }
-    }
-    return success;
+    return true;
 }
 
 /**
@@ -905,8 +1038,9 @@ static bool InstallCMDBPending(EvalContext *ctx, CMDBPending *pending)
  * dropped, and the action would then run unguarded.
  *
  * An absent file is not an error. A top-level key other than 'vars',
- * 'variables' and 'classes' is only warned about and skipped; it holds no
- * data this loader knows how to install.
+ * 'variables' and 'classes' makes the file invalid, as does a section whose
+ * value is not a JSON object (JSON null included), and two entries that
+ * name the same variable (one would silently replace the other).
  */
 bool LoadCMDBData(EvalContext *ctx)
 {
@@ -940,36 +1074,48 @@ bool LoadCMDBData(EvalContext *ctx)
 
     Log(LOG_LEVEL_VERBOSE, "Loaded CMDB data file '%s', validating contents", file_path);
 
+    bool unknown_key_found = false;
     JsonIterator iter = JsonIteratorInit(data);
     while (JsonIteratorHasMore(&iter))
     {
         const char *key = JsonIteratorNextKey(&iter);
-        /* Only vars and classes allowed in CMDB data */
+        /* Only vars, variables and classes allowed in CMDB data. A section
+         * this loader does not know is data it cannot install, which may be
+         * the very data a policy relies on (a misspelled 'variables' would
+         * drop an interlock and keep its services), so the file is refused. */
         if (!IsStrIn(key, (const char*[4]){"vars", "classes", "variables", NULL}))
         {
-            Log(LOG_LEVEL_WARNING, "Invalid key '%s' in the CMDB data file '%s', skipping it",
+            Log(LOG_LEVEL_ERR, "Invalid key '%s' in the CMDB data file '%s'"
+                " (only 'vars', 'variables' and 'classes' are allowed)",
                 key, file_path);
+            unknown_key_found = true;
         }
     }
 
     /* Step 1: validate everything, install nothing. Every section is
-     * looked at even after a failure, so the log names every bad entry. */
+     * looked at even after a failure, so the log names every bad entry.
+     * A section is there if its key is, whatever it holds: a JSON null is
+     * not "absent" and PrepareCMDB*() refuse it as not being an object. */
     CMDBPending pending = CMDBPendingNew();
-    bool valid = true;
+    bool valid = unknown_key_found ? false : true;
     JsonElement *vars = JsonObjectGet(data, "vars");
-    if (JSON_NOT_NULL(vars) && !PrepareCMDBVars(vars, file_path, &pending))
+    if (vars != NULL && !PrepareCMDBVars(vars, file_path, &pending))
     {
         valid = false;
     }
     /* Uses the new format allowing metadata (CFE-3633) */
     JsonElement *variables = JsonObjectGet(data, "variables");
-    if (JSON_NOT_NULL(variables) &&
+    if (variables != NULL &&
         !PrepareCMDBVariables(variables, file_path, &pending))
     {
         valid = false;
     }
     JsonElement *classes = JsonObjectGet(data, "classes");
-    if (JSON_NOT_NULL(classes) && !PrepareCMDBClasses(classes, file_path, &pending))
+    if (classes != NULL && !PrepareCMDBClasses(classes, file_path, &pending))
+    {
+        valid = false;
+    }
+    if (!CMDBPendingCheckNoDuplicates(&pending))
     {
         valid = false;
     }
