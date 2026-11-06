@@ -1,4 +1,6 @@
-# basic test of the host_specific.json functionality: 'classes' object with a tag and a comment
+# test of the host_specific.json functionality: an unknown top-level key is an
+# error and the whole file is rejected, so the valid 'classes' next to it is not
+# installed either
 body common control
 {
   inputs => { "../../default.sub.cf" };
@@ -38,8 +40,10 @@ bundle agent check
   methods:
     ""
       usebundle => dcs_passif_output(
-        "\s*warning: Invalid key 'clses'.*\s+ns1:test_class\s+.*",
-        "",
+        "\s*error: Invalid key 'clses' in the CMDB data file.*installing none of its contents.*",
+        # the unknown key makes the loader install nothing, so the valid
+        # class next to it is not defined
+        ".*\s+ns1:test_class\s+.*",
         $(command),
         $(this.promise_filename)
       );
