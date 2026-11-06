@@ -969,7 +969,8 @@ static void RollbackCMDBPending(EvalContext *ctx, CMDBPending *pending,
             ns = xstrndup(cls->key, sep - cls->key);
             name = sep + 1;
         }
-        char *canonical = CanonifyName(name);
+        char *canonical = xstrdup(name); /* CanonifyName() returns a static buffer */
+        CanonifyNameInPlace(canonical);
         EvalContextClassRemove(ctx, (ns != NULL) ? ns : CMDB_NAMESPACE, canonical);
         free(canonical);
         free(ns);
