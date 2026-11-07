@@ -1440,6 +1440,7 @@ void GetNetworkingInfo(EvalContext *ctx)
                      JsonPrimitiveGetAsInteger(metric) < lowest_metric))
                 {
                     default_route = route;
+                    lowest_metric = JsonPrimitiveGetAsInteger(metric);
                 }
             }
         }
