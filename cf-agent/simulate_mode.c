@@ -836,10 +836,10 @@ bool DiffPkgOperations()
         assert(!NULL_OR_EMPTY(pkg_name));
 
         /* We need to have a key for the map encoding package name and
-         * architecture. Let's use the sequence "-_-" as a separator to avoid
-         * collisions with possible weird package names. */
+         * architecture. Prefix the name with its length so that no pair of
+         * name and architecture can produce the same key as another pair. */
         char *name_arch;
-        xasprintf(&name_arch, "%s-_-%s", pkg_name, pkg_arch ? pkg_arch : "");
+        xasprintf(&name_arch, "%zu:%s:%s", strlen(pkg_name), pkg_name, pkg_arch ? pkg_arch : "");
 
         if (*op == CHROOT_PKG_OPERATION_CODE_PRESENT)
         {
@@ -1028,10 +1028,10 @@ bool ManifestPkgOperations()
         assert(!NULL_OR_EMPTY(pkg_name));
 
         /* We need to have a key for the map encoding package name and
-         * architecture. Let's use the sequence "-_-" as a separator to avoid
-         * collisions with possible weird package names. */
+         * architecture. Prefix the name with its length so that no pair of
+         * name and architecture can produce the same key as another pair. */
         char *name_arch;
-        xasprintf(&name_arch, "%s-_-%s", pkg_name, pkg_arch ? pkg_arch : "");
+        xasprintf(&name_arch, "%zu:%s:%s", strlen(pkg_name), pkg_name, pkg_arch ? pkg_arch : "");
 
         if ((*op == CHROOT_PKG_OPERATION_CODE_INSTALL) ||
             (*op == CHROOT_PKG_OPERATION_CODE_PRESENT))
