@@ -82,8 +82,8 @@ static void test_diff_install_cancels_removal(void)
     char output[4096];
     assert_true(call_with_captured_stdout(&DiffPkgOperations, output, sizeof(output)));
 
-    assert_true(strstr(output, "Package 'foo [1.2.3]' would be installed") != NULL);
-    assert_true(strstr(output, "would be removed") == NULL);
+    assert_true(StringContains(output, "Package 'foo [1.2.3]' would be installed"));
+    assert_false(StringContains(output, "would be removed"));
 
     unlink(ToChangesChroot(CHROOT_PKGS_OPS_FILE));
 }
@@ -98,7 +98,7 @@ static void test_diff_version_and_architecture(void)
     char output[4096];
     assert_true(call_with_captured_stdout(&DiffPkgOperations, output, sizeof(output)));
 
-    assert_true(strstr(output, "Package 'foo-x86_64 [1.2.3]' would be installed") != NULL);
+    assert_true(StringContains(output, "Package 'foo-x86_64 [1.2.3]' would be installed"));
 
     unlink(ToChangesChroot(CHROOT_PKGS_OPS_FILE));
 }
@@ -141,8 +141,8 @@ static void test_manifest_install_cancels_removal(void)
     char output[4096];
     assert_true(call_with_captured_stdout(&ManifestPkgOperations, output, sizeof(output)));
 
-    assert_true(strstr(output, "Package 'foo [1.2.3]' would be present") != NULL);
-    assert_true(strstr(output, "would be absent") == NULL);
+    assert_true(StringContains(output, "Package 'foo [1.2.3]' would be present"));
+    assert_false(StringContains(output, "would be absent"));
 
     unlink(ToChangesChroot(CHROOT_PKGS_OPS_FILE));
 }
@@ -157,10 +157,9 @@ static void test_diff_repeated_unversioned_install(void)
     char output[4096];
     assert_true(call_with_captured_stdout(&DiffPkgOperations, output, sizeof(output)));
 
-    const char *msg = "Package 'foo' would be installed";
-    const char *first = strstr(output, msg);
-    assert_true(first != NULL);
-    assert_true(strstr(first + strlen(msg), "would be installed") == NULL);
+    assert_true(StringContains(output, "Package 'foo' would be installed"));
+    /* Reported once: the report has no other line. */
+    assert_int_equal(StringCountTokens(output, strlen(output), "\n"), 1);
 
     unlink(ToChangesChroot(CHROOT_PKGS_OPS_FILE));
 }
@@ -175,8 +174,8 @@ static void test_diff_unversioned_then_versioned_install(void)
     char output[4096];
     assert_true(call_with_captured_stdout(&DiffPkgOperations, output, sizeof(output)));
 
-    assert_true(strstr(output, "Package 'foo [1.2.3]' would be installed") != NULL);
-    assert_true(strstr(output, "Package 'foo' would be installed") == NULL);
+    assert_true(StringContains(output, "Package 'foo [1.2.3]' would be installed"));
+    assert_false(StringContains(output, "Package 'foo' would be installed"));
 
     unlink(ToChangesChroot(CHROOT_PKGS_OPS_FILE));
 }
@@ -191,8 +190,8 @@ static void test_diff_versioned_then_unversioned_install(void)
     char output[4096];
     assert_true(call_with_captured_stdout(&DiffPkgOperations, output, sizeof(output)));
 
-    assert_true(strstr(output, "Package 'foo [1.2.3]' would be installed") != NULL);
-    assert_true(strstr(output, "Package 'foo' would be installed") == NULL);
+    assert_true(StringContains(output, "Package 'foo [1.2.3]' would be installed"));
+    assert_false(StringContains(output, "Package 'foo' would be installed"));
 
     unlink(ToChangesChroot(CHROOT_PKGS_OPS_FILE));
 }
@@ -207,8 +206,8 @@ static void test_diff_install_higher_version_first_keeps_first(void)
     char output[4096];
     assert_true(call_with_captured_stdout(&DiffPkgOperations, output, sizeof(output)));
 
-    assert_true(strstr(output, "Package 'foo [2.0.0]' would be installed") != NULL);
-    assert_true(strstr(output, "Package 'foo [1.0.0]' would be installed") == NULL);
+    assert_true(StringContains(output, "Package 'foo [2.0.0]' would be installed"));
+    assert_false(StringContains(output, "Package 'foo [1.0.0]' would be installed"));
 
     unlink(ToChangesChroot(CHROOT_PKGS_OPS_FILE));
 }
@@ -223,8 +222,8 @@ static void test_diff_install_higher_version_last_keeps_last(void)
     char output[4096];
     assert_true(call_with_captured_stdout(&DiffPkgOperations, output, sizeof(output)));
 
-    assert_true(strstr(output, "Package 'foo [2.0.0]' would be installed") != NULL);
-    assert_true(strstr(output, "Package 'foo [1.0.0]' would be installed") == NULL);
+    assert_true(StringContains(output, "Package 'foo [2.0.0]' would be installed"));
+    assert_false(StringContains(output, "Package 'foo [1.0.0]' would be installed"));
 
     unlink(ToChangesChroot(CHROOT_PKGS_OPS_FILE));
 }
@@ -239,10 +238,9 @@ static void test_diff_repeated_versioned_install(void)
     char output[4096];
     assert_true(call_with_captured_stdout(&DiffPkgOperations, output, sizeof(output)));
 
-    const char *msg = "Package 'foo [1.2.3]' would be installed";
-    const char *first = strstr(output, msg);
-    assert_true(first != NULL);
-    assert_true(strstr(first + strlen(msg), "would be installed") == NULL);
+    assert_true(StringContains(output, "Package 'foo [1.2.3]' would be installed"));
+    /* Reported once: the report has no other line. */
+    assert_int_equal(StringCountTokens(output, strlen(output), "\n"), 1);
 
     unlink(ToChangesChroot(CHROOT_PKGS_OPS_FILE));
 }
