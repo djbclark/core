@@ -1,0 +1,10 @@
+{
+  "vars": {
+    "good_key": "a literal value",
+    "repeated_key": "first",
+    "repeated_key": "second"
+  },
+  "classes": {
+    "ns1:cmdb_good_class": "any::"
+  }
+}

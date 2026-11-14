@@ -1,0 +1,93 @@
+# test that input after the document makes the CMDB loader install nothing from
+# host_specific.json: the parser used to stop after the first complete object
+# and never look at what followed
+body common control
+{
+  inputs => { "../../default.sub.cf" };
+  bundlesequence => { default("$(this.promise_filename)") };
+  version => "1.0";
+}
+
+#######################################################
+bundle agent init
+{
+  files:
+    "$(sys.workdir)$(const.dirsep)data$(const.dirsep)."
+      create => "true",
+      perms => mog(
+        "0700", "$(sys.user_data[username])", "$(sys.user_data[username])"
+      );
+
+  methods:
+    "prepare_host_specific_data"
+      usebundle => file_copy(
+        "$(this.promise_filename).json",
+        "$(sys.workdir)$(const.dirsep)data$(const.dirsep)host_specific.json"
+      ),
+      handle => "prepare_host_specific_data";
+
+    "empty_promises_cf"
+      usebundle => file_make("$(sys.inputdir)/promises.cf", '');
+}
+
+#######################################################
+bundle agent check
+{
+  vars:
+    "error_output"
+      string => execresult(
+        "$(sys.cf_promises) --show-classes -f $(sys.inputdir)/promises.cf",
+        "useshell"
+      ),
+      depends_on => { "prepare_host_specific_data" };
+
+    "vars_output"
+      string => execresult(
+        "$(sys.cf_promises) --show-vars -f $(sys.inputdir)/promises.cf | $(G.grep) good_key",
+        "useshell"
+      ),
+      depends_on => { "prepare_host_specific_data" };
+
+    "classes_output"
+      string => execresult(
+        "$(sys.cf_promises) --show-classes -f $(sys.inputdir)/promises.cf | $(G.grep) cmdb_good_class",
+        "useshell"
+      ),
+      depends_on => { "prepare_host_specific_data" };
+
+  classes:
+    # The file is refused by the parser, and the loader says so.
+    "refusal_reported"
+      expression => regcmp(
+        ".*error: Could not parse JSON file .*host_specific\.json: Unwilling to parse json data with trailing non-whitespace characters.*",
+        "$(error_output)"
+      );
+
+    # Nothing is installed from it: neither the variable nor the class next
+    # to the offending text.
+    "good_entry_absent"
+      not => regcmp(
+        ".*good_key.*",
+        "$(vars_output)"
+      );
+
+    "good_class_absent"
+      not => regcmp(
+        ".*cmdb_good_class.*",
+        "$(classes_output)"
+      );
+
+    "ok" and => { "refusal_reported", "good_entry_absent", "good_class_absent" };
+
+  reports:
+    ok::
+      "$(this.promise_filename) Pass";
+
+    !ok::
+      "$(this.promise_filename) FAIL";
+
+    !ok.DEBUG::
+      "error_output was: '$(error_output)'";
+      "vars_output was: '$(vars_output)'";
+      "classes_output was: '$(classes_output)'";
+}
