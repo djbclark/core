@@ -49,7 +49,21 @@
 #define CMDB_CLASSES_REGULAR_EXPRESSIONS "regular_expressions"
 #define CMDB_COMMENT_KEY "comment"
 
-bool (*CMDBTestFailInsertion)(const char *key) = NULL;
+#ifdef TEST_UNIT_TEST
+/**
+ * Only in the unit test build (cmdb_test.c includes this file with
+ * TEST_UNIT_TEST defined, as split_process_line_test.c does for
+ * processes_select.c): a variable or class whose CMDB key makes the hook
+ * return true is treated as one that cannot be inserted into the EvalContext,
+ * which validation cannot otherwise produce. It lets a test exercise the
+ * rollback of LoadCMDBData(). Production has no such pointer.
+ */
+static bool (*CMDBTestFailInsertion)(const char *key) = NULL;
+#define CMDBInsertionForcedToFail(key) \
+    (CMDBTestFailInsertion != NULL && CMDBTestFailInsertion(key))
+#else
+#define CMDBInsertionForcedToFail(key) false
+#endif
 
 /**
  * @param strict refuse what JsonParseFile() would repair or ignore: a repeated
@@ -369,7 +383,7 @@ static bool AddCMDBVariable(EvalContext *ctx, const char *key, const VarRef *ref
     assert(data != NULL);
     assert(tags != NULL);
 
-    if (CMDBTestFailInsertion != NULL && CMDBTestFailInsertion(key))
+    if (CMDBInsertionForcedToFail(key))
     {
         Log(LOG_LEVEL_ERR, "Variable '%s' cannot be added (insertion failure forced by a test)", key);
         StringSetDestroy(tags);
@@ -805,7 +819,7 @@ static bool AddCMDBClass(EvalContext *ctx, const char *key, StringSet *tags, con
     assert(key != NULL);
     assert(tags != NULL);
 
-    if (CMDBTestFailInsertion != NULL && CMDBTestFailInsertion(key))
+    if (CMDBInsertionForcedToFail(key))
     {
         Log(LOG_LEVEL_ERR, "Class '%s' cannot be added (insertion failure forced by a test)", key);
         StringSetDestroy(tags);
