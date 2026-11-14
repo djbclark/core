@@ -1,6 +1,10 @@
 #include <test.h>
 
 #include <eval_context.h>
+#include <class.h>                                         /* Class */
+#include <set.h>                                           /* StringSetContains */
+#include <string_lib.h>                                    /* StringEqual */
+#include <var_expressions.h>                               /* VarRefParse */
 #include <cmdb.h>
 #include <known_dirs.h>
 #include <misc_lib.h>                                          /* xsnprintf */
@@ -512,6 +516,225 @@ static void test_failed_insertion_rolls_back_everything(void)
     RemoveCMDBFile();
 }
 
+/* Is there a class of that name in the 'data' namespace, put there by
+ * something else than the CMDB (it has pre_tag, not the CMDB's tag)? */
+static bool ClassIsUntouched(const EvalContext *ctx, const char *name)
+{
+    const Class *cls = EvalContextClassGet(ctx, "data", name);
+    return (cls != NULL &&
+            StringSetContains(cls->tags, "pre_tag") &&
+            !StringSetContains(cls->tags, CMDB_SOURCE_TAG));
+}
+
+static void test_whitespace_class_name_installs_nothing(void)
+{
+    /* EvalContextClassPutTagsSet() refuses a default-namespace class whose
+     * name is only whitespace, and files "x " as "x_". The good variable and
+     * class beside it must not be installed either. */
+    const char *const names[] = {
+        " ", "\\t", "default: ", "ns1: ", "trailing ", " leading", "tab\\t",
+        NULL
+    };
+    const char *const absent[] = { "data:variables.good_var", NULL };
+    const char *const absent_class[] = {
+        "good_class", "trailing_", "_leading", "tab_", NULL
+    };
+
+    for (size_t i = 0; names[i] != NULL; i++)
+    {
+        char json[CF_BUFSIZE];
+        xsnprintf(json, sizeof(json),
+                  "{ \"vars\": { \"good_var\": \"x\" },\n"
+                  "  \"classes\": { \"good_class\": \"any::\", \"%s\": \"any::\" } }\n",
+                  names[i]);
+        assert_rejected_and_nothing_installed(json, absent, absent_class);
+    }
+}
+
+static void test_existing_class_is_not_an_error(void)
+{
+    /* A class that is there already stays as it is, and the rest of the file
+     * is installed; so does one that differs only in how it is spelled. */
+    WriteCMDBFile(
+        "{ \"vars\": { \"good_var\": \"x\" },\n"
+        "  \"classes\": { \"pre_class\": \"any::\", \"pre-aliased\": \"any::\","
+        "                 \"new_class\": \"any::\" } }\n");
+
+    EvalContext *ctx = EvalContextNew();
+    assert_true(EvalContextClassPutSoftNS(ctx, "data", "pre_class",
+                                          CONTEXT_SCOPE_NAMESPACE, "pre_tag"));
+    assert_true(EvalContextClassPutSoftNS(ctx, "data", "pre_aliased",
+                                          CONTEXT_SCOPE_NAMESPACE, "pre_tag"));
+    assert_true(LoadCMDBData(ctx));
+
+    assert_string_equal(InstalledScalar(ctx, "data:variables.good_var"), "x");
+    assert_true(ClassIsInstalled(ctx, "new_class"));
+    assert_false(ClassIsUntouched(ctx, "new_class"));
+    assert_true(ClassIsUntouched(ctx, "pre_class"));
+    assert_true(ClassIsUntouched(ctx, "pre_aliased"));
+
+    EvalContextDestroy(ctx);
+    RemoveCMDBFile();
+}
+
+static void test_existing_variable_is_refused_and_left_alone(void)
+{
+    /* Installing it would replace it, and a rollback could only remove it:
+     * the file is refused as a whole and the variable keeps its value. */
+    WriteCMDBFile(
+        "{ \"vars\": { \"first\": \"new\", \"other\": \"2\" },\n"
+        "  \"classes\": { \"new_class\": \"any::\" } }\n");
+
+    EvalContext *ctx = EvalContextNew();
+    VarRef *ref = VarRefParse("data:variables.first");
+    assert_true(EvalContextVariablePut(ctx, ref, "old", CF_DATA_TYPE_STRING,
+                                       "pre_tag"));
+    VarRefDestroy(ref);
+
+    assert_false(LoadCMDBData(ctx));
+
+    assert_string_equal(InstalledScalar(ctx, "data:variables.first"), "old");
+    assert_false(VariableIsInstalled(ctx, "data:variables.other"));
+    assert_false(ClassIsInstalled(ctx, "new_class"));
+
+    EvalContextDestroy(ctx);
+    RemoveCMDBFile();
+}
+
+static void test_rollback_removes_non_canonical_and_keeps_aliased(void)
+{
+    /* 'dash-class' is filed as 'dash_class' and rolled back by that name;
+     * 'pre-class' is the existing 'pre_class' by another spelling, so neither
+     * installing nor rolling back touches it. */
+    WriteCMDBFile(
+        "{ \"vars\": { \"first\": \"1\", \"fail_me\": \"2\" },\n"
+        "  \"classes\": { \"dash-class\": \"any::\", \"pre-class\": \"any::\" } }\n");
+
+    EvalContext *ctx = EvalContextNew();
+    assert_true(EvalContextClassPutSoftNS(ctx, "data", "pre_class",
+                                          CONTEXT_SCOPE_NAMESPACE, "pre_tag"));
+
+    /* Without the failure the class is there under the canonical name */
+    CMDBTestFailInsertion = NULL;
+    assert_true(LoadCMDBData(ctx));
+    assert_true(ClassIsInstalled(ctx, "dash_class"));
+    assert_true(ClassIsUntouched(ctx, "pre_class"));
+    EvalContextClear(ctx);
+    assert_true(EvalContextClassPutSoftNS(ctx, "data", "pre_class",
+                                          CONTEXT_SCOPE_NAMESPACE, "pre_tag"));
+
+    CMDBTestFailInsertion = FailInsertionOfFailMe;
+    const bool loaded = LoadCMDBData(ctx);
+    CMDBTestFailInsertion = NULL;
+    assert_false(loaded);
+
+    assert_false(ClassIsInstalled(ctx, "dash_class"));
+    assert_false(VariableIsInstalled(ctx, "data:variables.first"));
+    assert_true(ClassIsUntouched(ctx, "pre_class"));
+
+    EvalContextDestroy(ctx);
+    RemoveCMDBFile();
+}
+
+static bool FailInsertionOfFailClass(const char *key)
+{
+    return StringEqual(key, "fail_class");
+}
+
+static void test_failed_class_insertion_rolls_back_everything(void)
+{
+    /* A class that cannot be inserted is not "one that exists": the classes
+     * before it are taken back, the ones after it and the variables are not
+     * installed, and a class that was there before is left alone. */
+    WriteCMDBFile(
+        "{ \"vars\": { \"good_var\": \"x\" },\n"
+        "  \"classes\": { \"pre_class\": \"any::\", \"new-class\": \"any::\","
+        "                 \"ns1:new_ns_class\": \"any::\","
+        "                 \"fail_class\": \"any::\", \"late_class\": \"any::\" } }\n");
+
+    EvalContext *ctx = EvalContextNew();
+    assert_true(EvalContextClassPutSoftNS(ctx, "data", "pre_class",
+                                          CONTEXT_SCOPE_NAMESPACE, "pre_tag"));
+
+    CMDBTestFailInsertion = FailInsertionOfFailClass;
+    const bool loaded = LoadCMDBData(ctx);
+    CMDBTestFailInsertion = NULL;
+    assert_false(loaded);
+
+    assert_false(VariableIsInstalled(ctx, "data:variables.good_var"));
+    assert_false(ClassIsInstalled(ctx, "new_class"));
+    assert_true(EvalContextClassGet(ctx, "ns1", "new_ns_class") == NULL);
+    assert_false(ClassIsInstalled(ctx, "fail_class"));
+    assert_false(ClassIsInstalled(ctx, "late_class"));
+    assert_true(ClassIsUntouched(ctx, "pre_class"));
+
+    EvalContextDestroy(ctx);
+    RemoveCMDBFile();
+}
+
+static void test_repeated_member_or_trailing_input_installs_nothing(void)
+{
+    /* What the lenient parser repaired or ignored before validation saw it:
+     * a repeated member replaced the earlier one (an invalid earlier value
+     * vanished, or a whole section did), and anything after the document was
+     * not looked at. Each file has a good variable and class next to it. */
+    const char *const absent[] = {
+        "data:variables.good_var", "data:variables.v", "data:variables.good",
+        NULL
+    };
+    const char *const absent_class[] = { "good_class", "c", NULL };
+    const char *const files[] = {
+        /* repeated member at the top level (section replaced) */
+        "{ \"vars\": { \"good_var\": \"x\" }, \"vars\": { \"good\": \"y\" },\n"
+        "  \"classes\": { \"good_class\": \"any::\" } }\n",
+        /* repeated member, the earlier one invalid */
+        "{ \"vars\": { \"good_var\": \"x\", \"good\": null, \"good\": \"ok\" },\n"
+        "  \"classes\": { \"good_class\": \"any::\" } }\n",
+        /* repeated member in 'classes' */
+        "{ \"vars\": { \"good_var\": \"x\" },\n"
+        "  \"classes\": { \"good_class\": \"any::\", \"c\": \"any::\","
+        " \"c\": \"any::\" } }\n",
+        /* repeated member in 'variables', and in a nested object */
+        "{ \"vars\": { \"good_var\": \"x\" },\n"
+        "  \"variables\": { \"v\": { \"value\": \"1\" }, \"v\": { \"value\": \"2\" } },\n"
+        "  \"classes\": { \"good_class\": \"any::\" } }\n",
+        "{ \"vars\": { \"good_var\": \"x\" },\n"
+        "  \"variables\": { \"v\": { \"value\": \"1\", \"value\": \"2\" } },\n"
+        "  \"classes\": { \"good_class\": \"any::\" } }\n",
+        /* trailing input */
+        "{ \"vars\": { \"good_var\": \"x\" },\n"
+        "  \"classes\": { \"good_class\": \"any::\" } } {}\n",
+        "{ \"vars\": { \"good_var\": \"x\" },\n"
+        "  \"classes\": { \"good_class\": \"any::\" } }x\n",
+        "{ \"vars\": { \"good_var\": \"x\" },\n"
+        "  \"variables\": {},\n"
+        "  \"classes\": { \"good_class\": \"any::\" } } ]\n",
+        NULL
+    };
+
+    for (size_t i = 0; files[i] != NULL; i++)
+    {
+        assert_rejected_and_nothing_installed(files[i], absent, absent_class);
+    }
+}
+
+static void test_whitespace_after_document_is_fine(void)
+{
+    /* The control for the above: the same kind of file, nothing repeated and
+     * nothing after the document but whitespace, loads. */
+    WriteCMDBFile(
+        "{ \"vars\": { \"good_var\": \"x\" },\n"
+        "  \"classes\": { \"good_class\": \"any::\" } }  \n\t\n\n");
+
+    EvalContext *ctx = EvalContextNew();
+    assert_true(LoadCMDBData(ctx));
+    assert_string_equal(InstalledScalar(ctx, "data:variables.good_var"), "x");
+    assert_true(ClassIsInstalled(ctx, "good_class"));
+
+    EvalContextDestroy(ctx);
+    RemoveCMDBFile();
+}
+
 int main()
 {
     PRINT_TEST_BANNER();
@@ -536,6 +759,13 @@ int main()
         unit_test(test_unknown_top_level_key_installs_nothing),
         unit_test(test_duplicate_variable_installs_nothing),
         unit_test(test_failed_insertion_rolls_back_everything),
+        unit_test(test_whitespace_class_name_installs_nothing),
+        unit_test(test_existing_class_is_not_an_error),
+        unit_test(test_existing_variable_is_refused_and_left_alone),
+        unit_test(test_rollback_removes_non_canonical_and_keeps_aliased),
+        unit_test(test_failed_class_insertion_rolls_back_everything),
+        unit_test(test_repeated_member_or_trailing_input_installs_nothing),
+        unit_test(test_whitespace_after_document_is_fine),
     };
 
     int ret = run_tests(tests);

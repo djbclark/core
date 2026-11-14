@@ -23,6 +23,7 @@
 */
 
 #include <platform.h>
+#include <ctype.h>             /* isspace() */
 #include <unistd.h>
 #include <json.h>
 #include <set.h>                /* StringSet */
@@ -32,6 +33,7 @@
 #include <known_dirs.h>         /* GetDataDir() */
 #include <var_expressions.h>    /* VarRef, StringContainsUnresolved() */
 #include <eval_context.h>       /* EvalContext*() */
+#include <class.h>              /* Class */
 #include <files_names.h>        /* JoinPaths() */
 
 #include <cmdb.h>
@@ -49,12 +51,20 @@
 
 bool (*CMDBTestFailInsertion)(const char *key) = NULL;
 
-JsonElement *ReadJsonFile(const char *filename, LogLevel log_level, size_t size_max)
+/**
+ * @param strict refuse what JsonParseFile() would repair or ignore: a repeated
+ *        object member (it replaces the earlier one) and anything but
+ *        whitespace after the document (it is not looked at)
+ */
+static JsonElement *ReadJsonFileMode(const char *filename, LogLevel log_level,
+                                     size_t size_max, bool strict)
 {
     assert(filename != NULL);
 
     JsonElement *doc = NULL;
-    JsonParseError err = JsonParseFile(filename, size_max, &doc);
+    JsonParseError err = strict ?
+        JsonParseFileStrict(filename, size_max, &doc) :
+        JsonParseFile(filename, size_max, &doc);
 
     if (err == JSON_PARSE_ERROR_NO_SUCH_FILE)
     {
@@ -69,6 +79,11 @@ JsonElement *ReadJsonFile(const char *filename, LogLevel log_level, size_t size_
     }
 
     return doc;
+}
+
+JsonElement *ReadJsonFile(const char *filename, LogLevel log_level, size_t size_max)
+{
+    return ReadJsonFileMode(filename, log_level, size_max, false);
 }
 
 /* What made the unexpanded-variable walk below stop: exactly one of these is
@@ -749,13 +764,29 @@ static const char *CMDBClassNameOfKey(const char *key)
     return (sep == NULL) ? key : (sep + 1);
 }
 
-/** Does EvalContextClassPutTagsSet() have a name it can work with? */
+/**
+ * Does EvalContextClassPutTagsSet() have a name it can work with?
+ *
+ * That function chops trailing whitespace off a copy of the name and refuses
+ * the class if nothing is left (in the default namespace), yet files the class
+ * under the name as given, whitespace canonified to '_'. A name with
+ * whitespace at either end is thus either refused there or filed under a name
+ * its author did not write, so it is refused here.
+ */
 static bool CheckCMDBClassName(const char *key)
 {
     const char *name = CMDBClassNameOfKey(key);
     if (name[0] == '\0')
     {
         Log(LOG_LEVEL_ERR, "Invalid CMDB class '%s': the class name is empty", key);
+        return false;
+    }
+    if (isspace((unsigned char) name[0]) ||
+        isspace((unsigned char) name[strlen(name) - 1]))
+    {
+        Log(LOG_LEVEL_ERR,
+            "Invalid CMDB class '%s': the class name starts or ends with whitespace",
+            key);
         return false;
     }
     if (strlen(name) >= CF_MAXVARSIZE)
@@ -773,6 +804,13 @@ static bool AddCMDBClass(EvalContext *ctx, const char *key, StringSet *tags, con
     assert(ctx != NULL);
     assert(key != NULL);
     assert(tags != NULL);
+
+    if (CMDBTestFailInsertion != NULL && CMDBTestFailInsertion(key))
+    {
+        Log(LOG_LEVEL_ERR, "Class '%s' cannot be added (insertion failure forced by a test)", key);
+        StringSetDestroy(tags);
+        return false;
+    }
 
     bool ret;
     Log(LOG_LEVEL_VERBOSE, "Installing CMDB class '%s'", key);
@@ -939,9 +977,75 @@ static bool PrepareCMDBClasses(JsonElement *classes, const char *file_path,
 }
 
 /**
+ * The namespace and name EvalContextClassPutTagsSet() files a CMDB class
+ * under: the key split the way AddCMDBClass() splits it, the name canonified
+ * the way ClassInit() does. Both results are owned by the caller.
+ */
+static void CMDBClassIdentity(const char *key, char **ns, char **name)
+{
+    const char *sep = strchr(key, ':');
+    *ns = (sep != NULL) ? xstrndup(key, sep - key) : xstrdup(CMDB_NAMESPACE);
+    /* Not CanonifyName(): it returns a static buffer */
+    *name = xstrdup(CMDBClassNameOfKey(key));
+    CanonifyNameInPlace(*name);
+}
+
+/**
+ * Is the class there already? EvalContextClassPutTagsSet() decides that by the
+ * name as given, so 'pre-class' is not found where 'pre_class' is, and the
+ * existing class would be replaced; ask by the canonical identity instead.
+ */
+static bool CMDBClassExists(const EvalContext *ctx, const char *key)
+{
+    char *ns;
+    char *name;
+    CMDBClassIdentity(key, &ns, &name);
+    const Class *existing = EvalContextClassGet(ctx, ns, name);
+    free(ns);
+    free(name);
+    return (existing != NULL && existing->scope == CONTEXT_SCOPE_NAMESPACE);
+}
+
+/**
+ * Refuse a variable that exists already: installing it would replace the
+ * existing one, and RollbackCMDBPending() could not put that one back.
+ * Nothing is there to be replaced in practice, as the loader runs on a
+ * cleared context, before augments.
+ *
+ * @return false (logged) if any variable exists already
+ */
+static bool CMDBPendingCheckNoExistingVariables(const EvalContext *ctx,
+                                                const CMDBPending *pending)
+{
+    bool valid = true;
+    for (size_t i = 0; i < SeqLength(pending->variables); i++)
+    {
+        const CMDBPendingVariable *var = SeqAt(pending->variables, i);
+        /* The value of an empty list is NULL, so go by the type */
+        DataType type = CF_DATA_TYPE_NONE;
+        EvalContextVariableGetPlaintext(ctx, var->ref, &type);
+        if (type != CF_DATA_TYPE_NONE)
+        {
+            char *address = VarRefToString(var->ref, true);
+            Log(LOG_LEVEL_ERR,
+                "Invalid variable specification in CMDB data: '%s' names the"
+                " variable '%s' that exists already", var->key, address);
+            free(address);
+            valid = false;
+        }
+    }
+    return valid;
+}
+
+/**
  * Take back what InstallCMDBPending() installed so far: the first
  * variables_installed variables and every class marked installed. A class
  * that was already there was not installed by this load and is left alone.
+ *
+ * Removing is restoring only because nothing it removes was there before:
+ * LoadCMDBData() refuses a variable that exists already, and
+ * InstallCMDBPending() does not touch a class that does (by its canonical
+ * identity, so an alias of one is left alone too).
  */
 static void RollbackCMDBPending(EvalContext *ctx, CMDBPending *pending,
                                 size_t variables_installed)
@@ -960,20 +1064,12 @@ static void RollbackCMDBPending(EvalContext *ctx, CMDBPending *pending,
             continue;
         }
 
-        /* Split the key and name the class the way AddCMDBClass() put it */
-        char *ns = NULL;
-        const char *name = cls->key;
-        const char *sep = strchr(cls->key, ':');
-        if (sep != NULL)
-        {
-            ns = xstrndup(cls->key, sep - cls->key);
-            name = sep + 1;
-        }
-        char *canonical = xstrdup(name); /* CanonifyName() returns a static buffer */
-        CanonifyNameInPlace(canonical);
-        EvalContextClassRemove(ctx, (ns != NULL) ? ns : CMDB_NAMESPACE, canonical);
-        free(canonical);
+        char *ns;
+        char *name;
+        CMDBClassIdentity(cls->key, &ns, &name);
+        EvalContextClassRemove(ctx, ns, name);
         free(ns);
+        free(name);
     }
 }
 
@@ -983,27 +1079,37 @@ static void RollbackCMDBPending(EvalContext *ctx, CMDBPending *pending,
  * that already exists is not an error and is left as it is.
  *
  * All or nothing in its own right, should the validation have a gap: at the
- * first variable that cannot be installed, everything this call installed is
- * removed again and false is returned.
+ * first class or variable that cannot be installed, everything this call
+ * installed is removed again and false is returned.
  *
- * @return false if a variable could not be installed after all (details are
- *         logged); nothing is left installed then
+ * @return false if a class or variable could not be installed after all
+ *         (details are logged); nothing is left installed then
  */
 static bool InstallCMDBPending(EvalContext *ctx, CMDBPending *pending)
 {
-    /* Classes first: they cannot fail, and installing them before the
-     * variables lets a failing variable exercise the rollback of both. */
+    /* Classes first: installing them before the variables lets a failing
+     * variable exercise the rollback of both. */
     for (size_t i = 0; i < SeqLength(pending->classes); i++)
     {
         CMDBPendingClass *cls = SeqAt(pending->classes, i);
+        if (CMDBClassExists(ctx, cls->key))
+        {
+            /* Not an error, and not ours to replace or to take back */
+            Log(LOG_LEVEL_VERBOSE,
+                "Not adding CMDB class '%s', it exists already", cls->key);
+            continue;
+        }
+
         cls->installed = AddCMDBClass(ctx, cls->key, cls->tags, cls->comment);
         cls->tags = NULL;       /* consumed or destroyed by AddCMDBClass() */
         if (!cls->installed)
         {
-            /* It does not have to be and error, it could be a result of
-             * the class already existing. Anyways, details about
-             * potential errors should have been logged already. */
-            Log(LOG_LEVEL_DEBUG, "Did not add CMDB class '%s'", cls->key);
+            /* Details should have been logged already. */
+            Log(LOG_LEVEL_ERR,
+                "Failed to add CMDB class '%s', removing what was installed from the file",
+                cls->key);
+            RollbackCMDBPending(ctx, pending, 0);
+            return false;
         }
     }
 
@@ -1030,7 +1136,8 @@ static bool InstallCMDBPending(EvalContext *ctx, CMDBPending *pending)
  * Load host_specific.json into the EvalContext, all or nothing.
  *
  * If the file is there but anything in it is unusable (unreadable, not
- * valid JSON, not an object, a section of the wrong type, or any single
+ * valid JSON, a repeated member in any object, anything but whitespace after
+ * the document, not an object, a section of the wrong type, or any single
  * entry of 'vars', 'variables' or 'classes' that cannot be validated or
  * installed), nothing at all is installed from it, every problem found is
  * logged, and false is returned. A policy that guards an action by data it
@@ -1041,7 +1148,8 @@ static bool InstallCMDBPending(EvalContext *ctx, CMDBPending *pending)
  * An absent file is not an error. A top-level key other than 'vars',
  * 'variables' and 'classes' makes the file invalid, as does a section whose
  * value is not a JSON object (JSON null included), and two entries that
- * name the same variable (one would silently replace the other).
+ * name the same variable (one would silently replace the other), or a
+ * variable that exists already. A class that exists already is left as it is.
  */
 bool LoadCMDBData(EvalContext *ctx)
 {
@@ -1060,10 +1168,13 @@ bool LoadCMDBData(EvalContext *ctx)
         return false;
     }
 
-    JsonElement *data = ReadJsonFile(file_path, LOG_LEVEL_ERR, HOST_SPECIFIC_DATA_MAX_SIZE);
+    /* Strict: a repeated member would have replaced the earlier one, and
+     * trailing input would have been ignored, before any validation saw it. */
+    JsonElement *data = ReadJsonFileMode(file_path, LOG_LEVEL_ERR,
+                                         HOST_SPECIFIC_DATA_MAX_SIZE, true);
     if (data == NULL)
     {
-        /* Details are logged by ReadJsonFile() */
+        /* Details are logged by ReadJsonFileMode() */
         return false;
     }
     if (JsonGetType(data) != JSON_TYPE_OBJECT)
@@ -1117,6 +1228,10 @@ bool LoadCMDBData(EvalContext *ctx)
         valid = false;
     }
     if (!CMDBPendingCheckNoDuplicates(&pending))
+    {
+        valid = false;
+    }
+    if (!CMDBPendingCheckNoExistingVariables(ctx, &pending))
     {
         valid = false;
     }
