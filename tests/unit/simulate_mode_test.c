@@ -292,6 +292,7 @@ static void test_json_created_file(void)
     strlcpy(chrooted, ToChangesChroot(path), sizeof(chrooted));
     assert_true(MakeParentDirectory(chrooted, true, NULL));
     create_file(chrooted, "Hello, CFEngine!\n");
+    assert_int_equal(chmod(chrooted, 0640), 0);
     write_records(CHROOT_CHANGES_LIST_FILE, paths, 2);
 
     JsonElement *json = write_and_parse_changes();
@@ -306,6 +307,13 @@ static void test_json_created_file(void)
                         "created");
     assert_string_equal(JsonObjectGetAsString(file_info, "type"),
                         "regular file");
+    assert_string_equal(JsonObjectGetAsString(file_info, "permissions"),
+                        "0640");
+    assert_int_equal(
+        JsonPrimitiveGetAsInteger(JsonObjectGet(file_info, "size")), 17);
+    assert_string_equal(
+        JsonObjectGetAsString(file_info, "sha256"),
+        "9be7023e1f91bae9d1f734b49c579cc2091c71924ae7494c9a5a3a8006527615");
     JsonDestroy(json);
 }
 

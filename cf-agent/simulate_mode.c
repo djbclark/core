@@ -43,6 +43,7 @@
 #include <unix.h>               /* GetGroupName(), GetUserName() */
 #include <json.h>               /* JsonElement */
 #include <writer.h>             /* StringWriter() */
+#include <hash.h>               /* HashFile(), HashPrintSafe() */
 #include <definitions.h>        /* CF_PERMS_DEFAULT */
 
 #include <simulate_mode.h>
@@ -1174,6 +1175,43 @@ static JsonElement *ChangedFileAsJson(const char *path)
                            existed ? "modified" : "created");
     JsonObjectAppendString(file_info, "type",
                            GetFileTypeDescription(st.st_mode));
+    /* 64-bit, so that e.g. uid 4294967294 is not written as -2. */
+    JsonObjectAppendInteger64(file_info, "uid", (int64_t) st.st_uid);
+    JsonObjectAppendInteger64(file_info, "gid", (int64_t) st.st_gid);
+
+#ifndef __MINGW32__
+    /* The permissions of a symbolic link are meaningless. */
+    if (S_ISLNK(st.st_mode))
+    {
+        return file_info;
+    }
+#endif  /* !__MINGW32__ */
+
+    char perms[5];
+    xsnprintf(perms, sizeof(perms), "%04o", st.st_mode & CHMOD_MODE_BITS);
+    JsonObjectAppendString(file_info, "permissions", perms);
+
+    if (S_ISREG(st.st_mode))
+    {
+        JsonObjectAppendInteger64(file_info, "size", (int64_t) st.st_size);
+
+        /* HashFile() cannot report failure, it leaves the digest zeroed. */
+        static const unsigned char no_digest[EVP_MAX_MD_SIZE + 1] = {0};
+        unsigned char digest[EVP_MAX_MD_SIZE + 1];
+        HashFile(chrooted_path, digest, HASH_METHOD_SHA256, false);
+        if (memcmp(digest, no_digest, sizeof(digest)) != 0)
+        {
+            char digest_str[CF_HOSTKEY_STRING_SIZE];
+            HashPrintSafe(digest_str, sizeof(digest_str), digest,
+                          HASH_METHOD_SHA256, false);
+            JsonObjectAppendString(file_info, "sha256", digest_str);
+        }
+        else
+        {
+            Log(LOG_LEVEL_ERR, "Failed to compute the SHA-256 digest of '%s'",
+                chrooted_path);
+        }
+    }
     return file_info;
 }
 
