@@ -33,12 +33,4 @@
 JsonElement *ReadJsonFile(const char *filename, LogLevel log_level, size_t size_max);
 bool LoadCMDBData(EvalContext *ctx);
 
-/**
- * Test seam, NULL in production: when set, a variable or class whose CMDB key
- * makes it return true is treated as one that cannot be inserted into the
- * EvalContext, which validation cannot otherwise produce. It lets a unit test exercise the
- * rollback of LoadCMDBData().
- */
-extern bool (*CMDBTestFailInsertion)(const char *key);
-
 #endif  /* CFENGINE_CMDB_H */
