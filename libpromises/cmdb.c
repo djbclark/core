@@ -23,6 +23,7 @@
 */
 
 #include <platform.h>
+#include <ctype.h>             /* isspace() */
 #include <unistd.h>
 #include <json.h>
 #include <set.h>                /* StringSet */
@@ -32,6 +33,7 @@
 #include <known_dirs.h>         /* GetDataDir() */
 #include <var_expressions.h>    /* VarRef, StringContainsUnresolved() */
 #include <eval_context.h>       /* EvalContext*() */
+#include <class.h>              /* Class */
 #include <files_names.h>        /* JoinPaths() */
 
 #include <cmdb.h>
@@ -49,12 +51,20 @@
 
 bool (*CMDBTestFailInsertion)(const char *key) = NULL;
 
-JsonElement *ReadJsonFile(const char *filename, LogLevel log_level, size_t size_max)
+/**
+ * @param strict refuse what JsonParseFile() would repair or ignore: a repeated
+ *        object member (it replaces the earlier one) and anything but
+ *        whitespace after the document (it is not looked at)
+ */
+static JsonElement *ReadJsonFileMode(const char *filename, LogLevel log_level,
+                                     size_t size_max, bool strict)
 {
     assert(filename != NULL);
 
     JsonElement *doc = NULL;
-    JsonParseError err = JsonParseFile(filename, size_max, &doc);
+    JsonParseError err = strict ?
+        JsonParseFileStrict(filename, size_max, &doc) :
+        JsonParseFile(filename, size_max, &doc);
 
     if (err == JSON_PARSE_ERROR_NO_SUCH_FILE)
     {
@@ -69,6 +79,11 @@ JsonElement *ReadJsonFile(const char *filename, LogLevel log_level, size_t size_
     }
 
     return doc;
+}
+
+JsonElement *ReadJsonFile(const char *filename, LogLevel log_level, size_t size_max)
+{
+    return ReadJsonFileMode(filename, log_level, size_max, false);
 }
 
 /* What made the unexpanded-variable walk below stop: exactly one of these is
@@ -1121,7 +1136,8 @@ static bool InstallCMDBPending(EvalContext *ctx, CMDBPending *pending)
  * Load host_specific.json into the EvalContext, all or nothing.
  *
  * If the file is there but anything in it is unusable (unreadable, not
- * valid JSON, not an object, a section of the wrong type, or any single
+ * valid JSON, a repeated member in any object, anything but whitespace after
+ * the document, not an object, a section of the wrong type, or any single
  * entry of 'vars', 'variables' or 'classes' that cannot be validated or
  * installed), nothing at all is installed from it, every problem found is
  * logged, and false is returned. A policy that guards an action by data it
@@ -1152,10 +1168,13 @@ bool LoadCMDBData(EvalContext *ctx)
         return false;
     }
 
-    JsonElement *data = ReadJsonFile(file_path, LOG_LEVEL_ERR, HOST_SPECIFIC_DATA_MAX_SIZE);
+    /* Strict: a repeated member would have replaced the earlier one, and
+     * trailing input would have been ignored, before any validation saw it. */
+    JsonElement *data = ReadJsonFileMode(file_path, LOG_LEVEL_ERR,
+                                         HOST_SPECIFIC_DATA_MAX_SIZE, true);
     if (data == NULL)
     {
-        /* Details are logged by ReadJsonFile() */
+        /* Details are logged by ReadJsonFileMode() */
         return false;
     }
     if (JsonGetType(data) != JSON_TYPE_OBJECT)

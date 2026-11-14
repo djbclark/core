@@ -1,6 +1,10 @@
 #include <test.h>
 
 #include <eval_context.h>
+#include <class.h>                                         /* Class */
+#include <set.h>                                           /* StringSetContains */
+#include <string_lib.h>                                    /* StringEqual */
+#include <var_expressions.h>                               /* VarRefParse */
 #include <cmdb.h>
 #include <known_dirs.h>
 #include <misc_lib.h>                                          /* xsnprintf */
@@ -668,6 +672,69 @@ static void test_failed_class_insertion_rolls_back_everything(void)
     RemoveCMDBFile();
 }
 
+static void test_repeated_member_or_trailing_input_installs_nothing(void)
+{
+    /* What the lenient parser repaired or ignored before validation saw it:
+     * a repeated member replaced the earlier one (an invalid earlier value
+     * vanished, or a whole section did), and anything after the document was
+     * not looked at. Each file has a good variable and class next to it. */
+    const char *const absent[] = {
+        "data:variables.good_var", "data:variables.v", "data:variables.good",
+        NULL
+    };
+    const char *const absent_class[] = { "good_class", "c", NULL };
+    const char *const files[] = {
+        /* repeated member at the top level (section replaced) */
+        "{ \"vars\": { \"good_var\": \"x\" }, \"vars\": { \"good\": \"y\" },\n"
+        "  \"classes\": { \"good_class\": \"any::\" } }\n",
+        /* repeated member, the earlier one invalid */
+        "{ \"vars\": { \"good_var\": \"x\", \"good\": null, \"good\": \"ok\" },\n"
+        "  \"classes\": { \"good_class\": \"any::\" } }\n",
+        /* repeated member in 'classes' */
+        "{ \"vars\": { \"good_var\": \"x\" },\n"
+        "  \"classes\": { \"good_class\": \"any::\", \"c\": \"any::\","
+        " \"c\": \"any::\" } }\n",
+        /* repeated member in 'variables', and in a nested object */
+        "{ \"vars\": { \"good_var\": \"x\" },\n"
+        "  \"variables\": { \"v\": { \"value\": \"1\" }, \"v\": { \"value\": \"2\" } },\n"
+        "  \"classes\": { \"good_class\": \"any::\" } }\n",
+        "{ \"vars\": { \"good_var\": \"x\" },\n"
+        "  \"variables\": { \"v\": { \"value\": \"1\", \"value\": \"2\" } },\n"
+        "  \"classes\": { \"good_class\": \"any::\" } }\n",
+        /* trailing input */
+        "{ \"vars\": { \"good_var\": \"x\" },\n"
+        "  \"classes\": { \"good_class\": \"any::\" } } {}\n",
+        "{ \"vars\": { \"good_var\": \"x\" },\n"
+        "  \"classes\": { \"good_class\": \"any::\" } }x\n",
+        "{ \"vars\": { \"good_var\": \"x\" },\n"
+        "  \"variables\": {},\n"
+        "  \"classes\": { \"good_class\": \"any::\" } } ]\n",
+        NULL
+    };
+
+    for (size_t i = 0; files[i] != NULL; i++)
+    {
+        assert_rejected_and_nothing_installed(files[i], absent, absent_class);
+    }
+}
+
+static void test_whitespace_after_document_is_fine(void)
+{
+    /* The control for the above: the same kind of file, nothing repeated and
+     * nothing after the document but whitespace, loads. */
+    WriteCMDBFile(
+        "{ \"vars\": { \"good_var\": \"x\" },\n"
+        "  \"classes\": { \"good_class\": \"any::\" } }  \n\t\n\n");
+
+    EvalContext *ctx = EvalContextNew();
+    assert_true(LoadCMDBData(ctx));
+    assert_string_equal(InstalledScalar(ctx, "data:variables.good_var"), "x");
+    assert_true(ClassIsInstalled(ctx, "good_class"));
+
+    EvalContextDestroy(ctx);
+    RemoveCMDBFile();
+}
+
 int main()
 {
     PRINT_TEST_BANNER();
@@ -697,6 +764,8 @@ int main()
         unit_test(test_existing_variable_is_refused_and_left_alone),
         unit_test(test_rollback_removes_non_canonical_and_keeps_aliased),
         unit_test(test_failed_class_insertion_rolls_back_everything),
+        unit_test(test_repeated_member_or_trailing_input_installs_nothing),
+        unit_test(test_whitespace_after_document_is_fine),
     };
 
     int ret = run_tests(tests);
