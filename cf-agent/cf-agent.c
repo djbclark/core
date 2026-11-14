@@ -223,7 +223,7 @@ static const char *const HINTS[] =
     "Do not start CFEngine services as part of the bootstrap process",
     "Do not run database integrity checks and repairs at startup",
     "Run in simulate mode, either 'manifest', 'manifest-full' or 'diff'",
-    "Write the changed files of a --simulate run to the given file as JSON (renames are not included)",
+    "Write the change set of a --simulate run to the given file as JSON",
     NULL
 };
 

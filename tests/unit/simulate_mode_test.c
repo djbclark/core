@@ -299,6 +299,7 @@ static void test_json_created_file(void)
         JsonPrimitiveGetAsInteger(JsonObjectGet(json, "format_version")), 1);
     JsonElement *files = JsonObjectGetAsArray(json, "files");
     assert_int_equal(JsonLength(files), 1);
+    assert_int_equal(JsonLength(JsonObjectGetAsArray(json, "renames")), 0);
     JsonElement *file_info = JsonArrayGetAsObject(files, 0);
     assert_string_equal(JsonObjectGetAsString(file_info, "path"), path);
     assert_string_equal(JsonObjectGetAsString(file_info, "change"),
@@ -327,6 +328,24 @@ static void test_json_deleted_file(void)
                         "deleted");
     assert_true(JsonObjectGet(file_info, "type") == NULL);
     JsonDestroy(json);
+}
+
+static void test_json_renamed_file(void)
+{
+    const char *const names[] = {"/simulate-test/old", "/simulate-test/new"};
+    write_records(CHROOT_RENAMES_LIST_FILE, names, 2);
+
+    JsonElement *json = write_and_parse_changes();
+    JsonElement *renames = JsonObjectGetAsArray(json, "renames");
+    assert_int_equal(JsonLength(renames), 1);
+    JsonElement *rename = JsonArrayGetAsObject(renames, 0);
+    assert_string_equal(JsonObjectGetAsString(rename, "old_name"), names[0]);
+    assert_string_equal(JsonObjectGetAsString(rename, "new_name"), names[1]);
+    JsonDestroy(json);
+
+    /* An original name without the new name is an error. */
+    write_records(CHROOT_RENAMES_LIST_FILE, names, 1);
+    assert_false(WriteChangesJson(OUTPUT_FILE));
 }
 
 static void test_json_write_failure(void)
@@ -383,6 +402,7 @@ int main()
         unit_test(test_diff_repeated_versioned_install),
         unit_test(test_json_created_file),
         unit_test(test_json_deleted_file),
+        unit_test(test_json_renamed_file),
         unit_test(test_json_write_failure),
 #ifndef __MINGW32__
         unit_test(test_json_output_link_not_written_through),

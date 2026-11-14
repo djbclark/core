@@ -20,7 +20,13 @@
       "type": "symbolic link"
     }
   ],
-  "format_version": 1
+  "format_version": 1,
+  "renames": [
+    {
+      "new_name": "WORKDIR/tmp/renamed",
+      "old_name": "WORKDIR/tmp/rename-me"
+    }
+  ]
 }
 exit status 1 without --simulate
 exit status 1 with a relative path
