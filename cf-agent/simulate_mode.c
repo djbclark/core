@@ -1183,6 +1183,16 @@ static JsonElement *ChangedFileAsJson(const char *path)
     /* The permissions of a symbolic link are meaningless. */
     if (S_ISLNK(st.st_mode))
     {
+        char target[PATH_MAX] = {0};
+        if (readlink(chrooted_path, target, sizeof(target) - 1) > 0)
+        {
+            const char *real_target = target;
+            if (IsAbsoluteFileName(target))
+            {
+                real_target = ToNormalRoot(target);
+            }
+            JsonObjectAppendString(file_info, "target", real_target);
+        }
         return file_info;
     }
 #endif  /* !__MINGW32__ */
