@@ -341,6 +341,8 @@ int main(int argc, char *argv[])
 
     Nova_NoteAgentExecutionPerformance(config->input_file, start);
 
+    /* Before GenericAgentFinalize(), which deinitializes the crypto library
+     * needed for the file digests. */
     if ((SIMULATE_JSON_FILE != NULL) &&
         !WriteChangesJson(SIMULATE_JSON_FILE) && (ret == 0))
     {

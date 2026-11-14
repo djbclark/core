@@ -2,13 +2,23 @@
   "files": [
     {
       "change": "created",
+      "gid": GID,
       "path": "WORKDIR/tmp/create-me",
-      "type": "regular file"
+      "permissions": "0600",
+      "sha256": "406effb1e9c59672c66a598c2b21e331b23b16c54024e96d6df3e7c173549791",
+      "size": 7,
+      "type": "regular file",
+      "uid": UID
     },
     {
       "change": "modified",
+      "gid": GID,
       "path": "WORKDIR/tmp/modify-me",
-      "type": "regular file"
+      "permissions": "0600",
+      "sha256": "f39592393ef0859cb196a52693d2cea00fb2df784b3c04ae54aa7cadb8e562f8",
+      "size": 5,
+      "type": "regular file",
+      "uid": UID
     },
     {
       "change": "deleted",
@@ -16,8 +26,10 @@
     },
     {
       "change": "created",
+      "gid": GID,
       "path": "WORKDIR/tmp/link",
-      "type": "symbolic link"
+      "type": "symbolic link",
+      "uid": UID
     }
   ],
   "format_version": 1,
