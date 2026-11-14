@@ -12,7 +12,6 @@ bundle agent main
 
     "$(G.testroot)/modify-me" content => "after";
     "$(G.testroot)/delete-me" delete => tidy;
-    # Renames are not in the --simulate-json output yet.
     "$(G.testroot)/rename-me" rename => to("renamed");
     "$(G.testroot)/link" link_from => symlink("$(G.testroot)/modify-me");
 }
