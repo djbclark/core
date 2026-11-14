@@ -1,11 +1,14 @@
 #include <test.h>
 
+/* Includes cmdb.c itself, with its test hook (not in the production library) */
+#define TEST_UNIT_TEST
+#include <cmdb.c>
+
 #include <eval_context.h>
 #include <class.h>                                         /* Class */
 #include <set.h>                                           /* StringSetContains */
 #include <string_lib.h>                                    /* StringEqual */
 #include <var_expressions.h>                               /* VarRefParse */
-#include <cmdb.h>
 #include <known_dirs.h>
 #include <misc_lib.h>                                          /* xsnprintf */
 
