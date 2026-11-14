@@ -42,9 +42,11 @@ libcf_reactor_la_LIBADD = ../libpromises/libpromises.la
 libcf_reactor_la_SOURCES = \
 	cf-reactor.c \
 	file_watcher.c file_watcher.h \
+	package_watcher.c package_watcher.h \
 	reactor_context.c reactor_context.h \
 	reactor_transform.c reactor_transform.h \
 	stoppable_thread.c stoppable_thread.h \
+	user_watcher.c user_watcher.h \
 	wakeup_channel.c wakeup_channel.h \
 	watcher.c watcher.h
 

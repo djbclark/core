@@ -28,10 +28,16 @@
 #include <changes_chroot.h>     /* CHROOT_PKGS_OPS_FILE */
 #include <file_lib.h>           /* DeleteDirectoryTree() */
 #include <string_lib.h>         /* StringContains() */
+#include <files_lib.h>          /* MakeParentDirectory() */
+#include <json.h>               /* JsonParseFile() */
+#include <string_sequence.h>    /* WriteLenPrefixedString() */
+#include <writer.h>             /* FileWriter() */
 
 #include <simulate_mode.h>
 
 static char CHROOT_DIR[] = "/tmp/simulate_mode_test_chroot.XXXXXX";
+static char ORIG_DIR[] = "/tmp/simulate_mode_test_orig.XXXXXX";
+static char OUTPUT_FILE[PATH_MAX];
 
 /* #csv contains "op,name,version,architecture" records terminated by "\r\n",
  * just like the records written by RecordPkgOperationInChroot(). */
@@ -82,8 +88,8 @@ static void test_diff_install_cancels_removal(void)
     char output[4096];
     assert_true(call_with_captured_stdout(&DiffPkgOperations, output, sizeof(output)));
 
-    assert_true(strstr(output, "Package 'foo [1.2.3]' would be installed") != NULL);
-    assert_true(strstr(output, "would be removed") == NULL);
+    assert_true(StringContains(output, "Package 'foo [1.2.3]' would be installed"));
+    assert_false(StringContains(output, "would be removed"));
 
     unlink(ToChangesChroot(CHROOT_PKGS_OPS_FILE));
 }
@@ -98,7 +104,7 @@ static void test_diff_version_and_architecture(void)
     char output[4096];
     assert_true(call_with_captured_stdout(&DiffPkgOperations, output, sizeof(output)));
 
-    assert_true(strstr(output, "Package 'foo-x86_64 [1.2.3]' would be installed") != NULL);
+    assert_true(StringContains(output, "Package 'foo-x86_64 [1.2.3]' would be installed"));
 
     unlink(ToChangesChroot(CHROOT_PKGS_OPS_FILE));
 }
@@ -141,17 +147,252 @@ static void test_manifest_install_cancels_removal(void)
     char output[4096];
     assert_true(call_with_captured_stdout(&ManifestPkgOperations, output, sizeof(output)));
 
-    assert_true(strstr(output, "Package 'foo [1.2.3]' would be present") != NULL);
-    assert_true(strstr(output, "would be absent") == NULL);
+    assert_true(StringContains(output, "Package 'foo [1.2.3]' would be present"));
+    assert_false(StringContains(output, "would be absent"));
 
     unlink(ToChangesChroot(CHROOT_PKGS_OPS_FILE));
 }
+
+/* Two recorded installations of the same package without a version must be
+ * reported once, not abort on comparing the empty versions. */
+static void test_diff_repeated_unversioned_install(void)
+{
+    write_pkgs_ops("i,foo,,\r\n"
+                   "i,foo,,\r\n");
+
+    char output[4096];
+    assert_true(call_with_captured_stdout(&DiffPkgOperations, output, sizeof(output)));
+
+    assert_true(StringContains(output, "Package 'foo' would be installed"));
+    /* Reported once: the report has no other line. */
+    assert_int_equal(StringCountTokens(output, strlen(output), "\n"), 1);
+
+    unlink(ToChangesChroot(CHROOT_PKGS_OPS_FILE));
+}
+
+/* A versioned installation record is more specific than an unversioned one
+ * of the same package, so it is the one to report. */
+static void test_diff_unversioned_then_versioned_install(void)
+{
+    write_pkgs_ops("i,foo,,\r\n"
+                   "i,foo,1.2.3,\r\n");
+
+    char output[4096];
+    assert_true(call_with_captured_stdout(&DiffPkgOperations, output, sizeof(output)));
+
+    assert_true(StringContains(output, "Package 'foo [1.2.3]' would be installed"));
+    assert_false(StringContains(output, "Package 'foo' would be installed"));
+
+    unlink(ToChangesChroot(CHROOT_PKGS_OPS_FILE));
+}
+
+/* An unversioned installation record must never replace an existing
+ * versioned installation record of the same package. */
+static void test_diff_versioned_then_unversioned_install(void)
+{
+    write_pkgs_ops("i,foo,1.2.3,\r\n"
+                   "i,foo,,\r\n");
+
+    char output[4096];
+    assert_true(call_with_captured_stdout(&DiffPkgOperations, output, sizeof(output)));
+
+    assert_true(StringContains(output, "Package 'foo [1.2.3]' would be installed"));
+    assert_false(StringContains(output, "Package 'foo' would be installed"));
+
+    unlink(ToChangesChroot(CHROOT_PKGS_OPS_FILE));
+}
+
+/* When two installations are recorded with different versions and the first
+ * has the higher version, the first record is kept. */
+static void test_diff_install_higher_version_first_keeps_first(void)
+{
+    write_pkgs_ops("i,foo,2.0.0,\r\n"
+                   "i,foo,1.0.0,\r\n");
+
+    char output[4096];
+    assert_true(call_with_captured_stdout(&DiffPkgOperations, output, sizeof(output)));
+
+    assert_true(StringContains(output, "Package 'foo [2.0.0]' would be installed"));
+    assert_false(StringContains(output, "Package 'foo [1.0.0]' would be installed"));
+
+    unlink(ToChangesChroot(CHROOT_PKGS_OPS_FILE));
+}
+
+/* When two installations are recorded with different versions and the last
+ * has the higher version, the last record replaces the first. */
+static void test_diff_install_higher_version_last_keeps_last(void)
+{
+    write_pkgs_ops("i,foo,1.0.0,\r\n"
+                   "i,foo,2.0.0,\r\n");
+
+    char output[4096];
+    assert_true(call_with_captured_stdout(&DiffPkgOperations, output, sizeof(output)));
+
+    assert_true(StringContains(output, "Package 'foo [2.0.0]' would be installed"));
+    assert_false(StringContains(output, "Package 'foo [1.0.0]' would be installed"));
+
+    unlink(ToChangesChroot(CHROOT_PKGS_OPS_FILE));
+}
+
+/* Two recorded installations of the same package with the same version
+ * must be reported once. */
+static void test_diff_repeated_versioned_install(void)
+{
+    write_pkgs_ops("i,foo,1.2.3,\r\n"
+                   "i,foo,1.2.3,\r\n");
+
+    char output[4096];
+    assert_true(call_with_captured_stdout(&DiffPkgOperations, output, sizeof(output)));
+
+    assert_true(StringContains(output, "Package 'foo [1.2.3]' would be installed"));
+    /* Reported once: the report has no other line. */
+    assert_int_equal(StringCountTokens(output, strlen(output), "\n"), 1);
+
+    unlink(ToChangesChroot(CHROOT_PKGS_OPS_FILE));
+}
+
+static void write_records(const char *records_file,
+                          const char *const records[], size_t n)
+{
+    unlink(ToChangesChroot(CHROOT_CHANGES_LIST_FILE));
+    unlink(ToChangesChroot(CHROOT_RENAMES_LIST_FILE));
+    FILE *file = fopen(ToChangesChroot(records_file), "w");
+    assert_true(file != NULL);
+    Writer *writer = FileWriter(file);
+    for (size_t i = 0; i < n; i++)
+    {
+        assert_true(WriteLenPrefixedString(writer, records[i]));
+    }
+    WriterClose(writer);
+}
+
+static void create_file(const char *path, const char *content)
+{
+    FILE *file = fopen(path, "w");
+    assert_true(file != NULL);
+    assert_true(fputs(content, file) >= 0);
+    fclose(file);
+}
+
+static JsonElement *write_and_parse_changes(void)
+{
+    assert_true(WriteChangesJson(OUTPUT_FILE));
+    JsonElement *json = NULL;
+    assert_int_equal(JsonParseFile(OUTPUT_FILE, 1024 * 1024, &json),
+                     JSON_PARSE_OK);
+    return json;
+}
+
+static void test_json_created_file(void)
+{
+    /* Recorded twice, reported once. */
+    const char *const path = "/simulate-test/created \"file\"";
+    const char *const paths[] = {path, path};
+    char chrooted[PATH_MAX];
+    strlcpy(chrooted, ToChangesChroot(path), sizeof(chrooted));
+    assert_true(MakeParentDirectory(chrooted, true, NULL));
+    create_file(chrooted, "Hello, CFEngine!\n");
+    assert_int_equal(chmod(chrooted, 0640), 0);
+    write_records(CHROOT_CHANGES_LIST_FILE, paths, 2);
+
+    JsonElement *json = write_and_parse_changes();
+    assert_int_equal(
+        JsonPrimitiveGetAsInteger(JsonObjectGet(json, "format_version")), 1);
+    JsonElement *files = JsonObjectGetAsArray(json, "files");
+    assert_int_equal(JsonLength(files), 1);
+    assert_int_equal(JsonLength(JsonObjectGetAsArray(json, "renames")), 0);
+    JsonElement *file_info = JsonArrayGetAsObject(files, 0);
+    assert_string_equal(JsonObjectGetAsString(file_info, "path"), path);
+    assert_string_equal(JsonObjectGetAsString(file_info, "change"),
+                        "created");
+    assert_string_equal(JsonObjectGetAsString(file_info, "type"),
+                        "regular file");
+    assert_string_equal(JsonObjectGetAsString(file_info, "permissions"),
+                        "0640");
+    assert_int_equal(
+        JsonPrimitiveGetAsInteger(JsonObjectGet(file_info, "size")), 17);
+    assert_string_equal(
+        JsonObjectGetAsString(file_info, "sha256"),
+        "9be7023e1f91bae9d1f734b49c579cc2091c71924ae7494c9a5a3a8006527615");
+    JsonDestroy(json);
+}
+
+static void test_json_deleted_file(void)
+{
+    /* Exists outside of the chroot, but not in it. The second path exists
+     * in neither, it was created and deleted by the run. */
+    char path[PATH_MAX];
+    xsnprintf(path, sizeof(path), "%s/deleted-file", ORIG_DIR);
+    create_file(path, "");
+    const char *const paths[] = {path, "/simulate-test/created-and-deleted"};
+    write_records(CHROOT_CHANGES_LIST_FILE, paths, 2);
+
+    JsonElement *json = write_and_parse_changes();
+    JsonElement *files = JsonObjectGetAsArray(json, "files");
+    assert_int_equal(JsonLength(files), 1);
+    JsonElement *file_info = JsonArrayGetAsObject(files, 0);
+    assert_string_equal(JsonObjectGetAsString(file_info, "path"), path);
+    assert_string_equal(JsonObjectGetAsString(file_info, "change"),
+                        "deleted");
+    assert_true(JsonObjectGet(file_info, "type") == NULL);
+    JsonDestroy(json);
+}
+
+static void test_json_renamed_file(void)
+{
+    const char *const names[] = {"/simulate-test/old", "/simulate-test/new"};
+    write_records(CHROOT_RENAMES_LIST_FILE, names, 2);
+
+    JsonElement *json = write_and_parse_changes();
+    JsonElement *renames = JsonObjectGetAsArray(json, "renames");
+    assert_int_equal(JsonLength(renames), 1);
+    JsonElement *rename = JsonArrayGetAsObject(renames, 0);
+    assert_string_equal(JsonObjectGetAsString(rename, "old_name"), names[0]);
+    assert_string_equal(JsonObjectGetAsString(rename, "new_name"), names[1]);
+    JsonDestroy(json);
+
+    /* An original name without the new name is an error. */
+    write_records(CHROOT_RENAMES_LIST_FILE, names, 1);
+    assert_false(WriteChangesJson(OUTPUT_FILE));
+}
+
+static void test_json_write_failure(void)
+{
+    write_records(CHROOT_RENAMES_LIST_FILE, NULL, 0);
+    char bad_output[PATH_MAX];
+    xsnprintf(bad_output, sizeof(bad_output), "%s/no-such-dir/out.json",
+              ORIG_DIR);
+    assert_false(WriteChangesJson(bad_output));
+}
+
+#ifndef __MINGW32__
+static void test_json_output_link_not_written_through(void)
+{
+    write_records(CHROOT_RENAMES_LIST_FILE, NULL, 0);
+    char other_file[PATH_MAX];
+    xsnprintf(other_file, sizeof(other_file), "%s/other-file", ORIG_DIR);
+    create_file(other_file, "keep\n");
+    unlink(OUTPUT_FILE);
+    assert_int_equal(link(other_file, OUTPUT_FILE), 0);
+
+    JsonDestroy(write_and_parse_changes());
+
+    char buf[16] = {0};
+    FILE *file = fopen(other_file, "r");
+    assert_true(file != NULL);
+    assert_true(fread(buf, 1, sizeof(buf) - 1, file) > 0);
+    fclose(file);
+    assert_string_equal(buf, "keep\n");
+}
+#endif  /* !__MINGW32__ */
 
 int main()
 {
     PRINT_TEST_BANNER();
 
     assert_true(mkdtemp(CHROOT_DIR) != NULL);
+    assert_true(mkdtemp(ORIG_DIR) != NULL);
+    xsnprintf(OUTPUT_FILE, sizeof(OUTPUT_FILE), "%s/out.json", ORIG_DIR);
     SetChangesChroot(CHROOT_DIR);
 
     const UnitTest tests[] =
@@ -161,11 +402,26 @@ int main()
         unit_test(test_diff_removal_with_version),
         unit_test(test_diff_removal_with_other_version_keeps_install),
         unit_test(test_manifest_install_cancels_removal),
+        unit_test(test_diff_repeated_unversioned_install),
+        unit_test(test_diff_unversioned_then_versioned_install),
+        unit_test(test_diff_versioned_then_unversioned_install),
+        unit_test(test_diff_install_higher_version_first_keeps_first),
+        unit_test(test_diff_install_higher_version_last_keeps_last),
+        unit_test(test_diff_repeated_versioned_install),
+        unit_test(test_json_created_file),
+        unit_test(test_json_deleted_file),
+        unit_test(test_json_renamed_file),
+        unit_test(test_json_write_failure),
+#ifndef __MINGW32__
+        unit_test(test_json_output_link_not_written_through),
+#endif
     };
 
     int ret = run_tests(tests);
 
     DeleteDirectoryTree(CHROOT_DIR);
+    DeleteDirectoryTree(ORIG_DIR);
+    rmdir(ORIG_DIR);
     rmdir(CHROOT_DIR);
 
     return ret;
