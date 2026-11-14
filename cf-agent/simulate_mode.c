@@ -1240,6 +1240,31 @@ static bool AddChangedFilesToJson(JsonElement *files)
     return success;
 }
 
+static bool AddRenamedFilesToJson(JsonElement *renames)
+{
+    assert(renames != NULL);
+
+    Seq *names = SeqNew(16, free);
+    bool success = ReadChrootRecords(CHROOT_RENAMES_LIST_FILE, names);
+    const size_t n_names = SeqLength(names);
+    if ((n_names % 2) != 0)
+    {
+        /* Pairs of the original and the new name, see
+         * RecordFileRenamedInChroot(). */
+        Log(LOG_LEVEL_ERR, "Invalid data about renamed files");
+        success = false;
+    }
+    for (size_t i = 0; success && (i < n_names); i += 2)
+    {
+        JsonElement *rename = JsonObjectCreate(2);
+        JsonObjectAppendString(rename, "old_name", SeqAt(names, i));
+        JsonObjectAppendString(rename, "new_name", SeqAt(names, i + 1));
+        JsonArrayAppendObject(renames, rename);
+    }
+    SeqDestroy(names);
+    return success;
+}
+
 bool WriteChangesJson(const char *output_file)
 {
     assert(output_file != NULL);
@@ -1248,7 +1273,9 @@ bool WriteChangesJson(const char *output_file)
     JsonObjectAppendInteger(json, "format_version", 1);
     JsonElement *files = JsonArrayCreate(16);
     JsonObjectAppendArray(json, "files", files);
-    if (!AddChangedFilesToJson(files))
+    JsonElement *renames = JsonArrayCreate(16);
+    JsonObjectAppendArray(json, "renames", renames);
+    if (!AddChangedFilesToJson(files) || !AddRenamedFilesToJson(renames))
     {
         JsonDestroy(json);
         return false;
