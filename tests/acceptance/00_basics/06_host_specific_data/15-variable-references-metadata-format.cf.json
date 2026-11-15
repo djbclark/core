@@ -1,8 +1,6 @@
 {
   "variables": {
-    "good_key": {
-      "value": "a literal value"
-    },
+    "good_key": { "value": "a literal value" },
     "key_with_unresolved_value": {
       "value": "$(sys.workdir)",
       "comment": "the offending entry must be named by this key, not by 'value'",

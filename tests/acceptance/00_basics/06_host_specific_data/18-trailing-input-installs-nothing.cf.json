@@ -1,0 +1,9 @@
+{
+  "vars": {
+    "good_key": "a literal value"
+  },
+  "classes": {
+    "ns1:cmdb_good_class": "any::"
+  }
+}
+{ "vars": { "other_key": "never looked at" } }
