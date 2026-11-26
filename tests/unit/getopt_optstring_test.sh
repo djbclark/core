@@ -27,11 +27,12 @@
 # getopt_long() matches the first occurrence, so a second one is dead and means
 # the string disagrees with itself.
 #
-# This test is deliberately conservative. It reports only the two unambiguous
-# faults above. It does not check argument specifications, because reconciling
-# those is sometimes a judgement call about the intended interface rather than
-# a mechanical fix. Anything it cannot parse it skips rather than failing on,
-# so a construct it does not understand can never break the build.
+# This test reports the two unambiguous faults above. It does not check
+# argument specifications, because reconciling those is sometimes a judgement
+# call about the intended interface rather than a mechanical fix. A missing
+# listed file or any getopt_long() call site that cannot be parsed and paired
+# with its struct option table and option string fails with exit 2. Every
+# checked call site prints a CHECKED identity line, followed by CHECKED_TOTAL.
 
 #
 # Detect and replace non-POSIX shell
@@ -94,7 +95,10 @@ FOUND=0
 CHECKED_TOTAL=0
 
 for f in $FILES; do
-    [ -f "$TOP/$f" ] || continue
+    if [ ! -f "$TOP/$f" ]; then
+        echo "$f: listed source file is missing (expected '$TOP/$f')"
+        exit 2
+    fi
 
     OUT=`awk -v FILENAME_SHORT="$f" '
     # POSIX awk does not guarantee \x escapes; build the apostrophe by code.
@@ -147,9 +151,18 @@ for f in $FILES; do
     }
 
     # ---- getopt_long() call sites ----------------------------------------
-    /getopt_long[ \t]*\(/ { acc = $0; collecting = 1; held = 0 }
+    /getopt_long[ \t]*\(/ {
+        if (collecting) {
+            printf "UNPARSED %s:%d: could not parse getopt_long() call arguments before next call\n", \
+                   FILENAME_SHORT, call_line
+        }
+        acc = $0
+        call_line = NR
+        collecting = 1
+        held = 0
+    }
     collecting {
-        if (acc != $0) { acc = acc " " $0 }
+        if (NR != call_line) { acc = acc " " $0 }
 
         call = acc
         sub(/.*getopt_long[ \t]*\(/, "", call)
@@ -164,25 +177,42 @@ for f in $FILES; do
         # the first line, leaving a trailing comma and an empty 4th field.
         # Keep reading rather than giving up on it.
         if (n < 4 || tname == "") {
-            if (++held > 4) { collecting = 0 }   # runaway guard
+            if (++held > 4) {
+                printf "UNPARSED %s:%d: could not parse getopt_long() call arguments (runaway wrap)\n", \
+                       FILENAME_SHORT, call_line
+                collecting = 0
+            }
             next
         }
         collecting = 0
 
         if (optexpr ~ /^"/) {
+            if (optexpr !~ /^"[^"]*"$/) {
+                printf "UNPARSED %s:%d: could not parse option string literal %s\n", \
+                       FILENAME_SHORT, call_line, optexpr
+                next
+            }
             lit = optexpr
             sub(/^"/, "", lit); sub(/".*/, "", lit)
         } else {
             key = optexpr
-            gsub(/[^A-Za-z0-9_]/, "", key)
-            if (!(key in var_val)) { next }   # cannot resolve: skip
+            if (key !~ /^[A-Za-z_][A-Za-z0-9_]*$/ || !(key in var_val)) {
+                printf "UNPARSED %s:%d: could not resolve option string variable \"%s\"\n", \
+                       FILENAME_SHORT, call_line, optexpr
+                next
+            }
             lit = var_val[key]
         }
-        if (!(tname in tab_n)) { next }       # cannot resolve: skip
+        if (!(tname in tab_n)) {
+            printf "UNPARSED %s:%d: could not resolve struct option table \"%s\"\n", \
+                   FILENAME_SHORT, call_line, tname
+            next
+        }
 
         # Record that this call site really was inspected. A parser that
         # silently stops understanding a file would otherwise report success.
-        printf "CHECKED\n"
+        printf "CHECKED %s:%d table=%s optstring=\"%s\"\n", \
+               FILENAME_SHORT, call_line, tname, lit
 
         # index the option string: char -> present
         delete present
@@ -212,14 +242,39 @@ for f in $FILES; do
         }
         next
     }
+    END {
+        if (collecting) {
+            printf "UNPARSED %s:%d: could not parse getopt_long() call arguments before EOF\n", \
+                   FILENAME_SHORT, call_line
+        }
+    }
     ' "$TOP/$f"`
 
-    NCHECKED=`echo "$OUT" | grep -c "^CHECKED$"`
-    OUT=`echo "$OUT" | grep -v "^CHECKED$"`
+    if [ -n "$OUT" ]; then
+        CHECKED_LINES=`printf '%s\n' "$OUT" | grep "^CHECKED "`
+        UNPARSED_LINES=`printf '%s\n' "$OUT" | grep "^UNPARSED "`
+        NCHECKED=`printf '%s\n' "$OUT" | grep -c "^CHECKED "`
+        FAULT_LINES=`printf '%s\n' "$OUT" | grep -v "^CHECKED " | grep -v "^UNPARSED "`
+    else
+        CHECKED_LINES=""
+        UNPARSED_LINES=""
+        NCHECKED=0
+        FAULT_LINES=""
+    fi
 
-    # Every listed file calls getopt_long(). If none of its call sites could be
-    # paired with a table, this test has stopped understanding the source and
-    # is no longer testing anything -- say so instead of passing quietly.
+    if [ -n "$CHECKED_LINES" ]; then
+        printf '%s\n' "$CHECKED_LINES"
+    fi
+
+    if [ -n "$UNPARSED_LINES" ]; then
+        printf '%s\n' "$UNPARSED_LINES"
+        exit 2
+    fi
+
+    # Every listed file that mentions getopt_long must have at least one
+    # paired call site. If none could be paired with a table, this test has
+    # stopped understanding the source and is no longer testing anything --
+    # say so instead of passing quietly.
     if [ "$NCHECKED" -eq 0 ] && grep -q "getopt_long" "$TOP/$f"; then
         echo "$f: calls getopt_long() but no call site could be paired with"
         echo "  its struct option table. This test can no longer parse this"
@@ -229,11 +284,13 @@ for f in $FILES; do
     fi
     CHECKED_TOTAL=`expr "$CHECKED_TOTAL" + "$NCHECKED"`
 
-    if [ -n "$OUT" ]; then
-        echo "$OUT"
+    if [ -n "$FAULT_LINES" ]; then
+        printf '%s\n' "$FAULT_LINES"
         FOUND=1
     fi
 done
+
+echo "CHECKED_TOTAL=$CHECKED_TOTAL"
 
 if [ "$CHECKED_TOTAL" -eq 0 ]; then
     echo "No getopt_long() call sites were checked at all."
