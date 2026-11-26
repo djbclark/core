@@ -3,7 +3,5 @@
     "good_key": "a literal value",
     "key_with_unresolved_value": "$(sys.workdir)"
   },
-  "classes": {
-    "good_class": "any::"
-  }
+  "classes": { "good_class": "any::" }
 }

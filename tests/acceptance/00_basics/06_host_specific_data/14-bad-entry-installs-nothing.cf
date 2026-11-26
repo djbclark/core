@@ -60,24 +60,16 @@ bundle agent check
         "$(classes_output)"
       );
 
-    "good_var_absent"
-      not => regcmp(
-        ".*good_key.*",
-        "$(vars_output)"
-      );
+    "good_var_absent" not => regcmp(".*good_key.*", "$(vars_output)");
+    "good_class_absent" not => regcmp(".*good_class.*", "$(classes_output)");
 
-    "good_class_absent"
-      not => regcmp(
-        ".*good_class.*",
-        "$(classes_output)"
-      );
-
-    "ok" and => {
-      "vars_rejected",
-      "nothing_installed_reported",
-      "good_var_absent",
-      "good_class_absent"
-    };
+    "ok"
+      and => {
+        "vars_rejected",
+        "nothing_installed_reported",
+        "good_var_absent",
+        "good_class_absent",
+      };
 
   reports:
     ok::
