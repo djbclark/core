@@ -34,6 +34,7 @@ void tests_setup(void)
 
 void tests_teardown(void)
 {
+    chmod(GetDataDir(), 0700);
     char cmd[CF_BUFSIZE];
     xsnprintf(cmd, CF_BUFSIZE, "rm -rf '%s'", CFWORKDIR);
     system(cmd);
@@ -101,8 +102,15 @@ static void test_missing_file_is_not_an_error(void)
 {
     RemoveCMDBFile();
 
+    char path[CF_BUFSIZE];
+    CMDBFilePath(path, sizeof(path));
+    assert_int_equal(access(path, F_OK), -1);
+    assert_int_equal(errno, ENOENT);
+
     EvalContext *ctx = EvalContextNew();
     assert_true(LoadCMDBData(ctx));
+    assert_false(VariableIsInstalled(ctx, "data:variables.good_var"));
+    assert_false(ClassIsInstalled(ctx, "good_class"));
     EvalContextDestroy(ctx);
 }
 
@@ -826,6 +834,169 @@ static void test_embedded_nul_byte_installs_nothing(void)
     }
 }
 
+static void test_non_directory_parent_is_not_an_error(void)
+{
+    RemoveCMDBFile();
+    assert_int_equal(rmdir(GetDataDir()), 0);
+
+    FILE *f = fopen(GetDataDir(), "wb");
+    assert_true(f != NULL);
+    assert_int_equal(fclose(f), 0);
+
+    char path[CF_BUFSIZE];
+    CMDBFilePath(path, sizeof(path));
+    assert_int_equal(access(path, F_OK), -1);
+    assert_int_equal(errno, ENOTDIR);
+
+    EvalContext *ctx = EvalContextNew();
+    assert_true(LoadCMDBData(ctx));
+    assert_false(VariableIsInstalled(ctx, "data:variables.good_var"));
+    assert_false(ClassIsInstalled(ctx, "good_class"));
+    EvalContextDestroy(ctx);
+
+    assert_int_equal(unlink(GetDataDir()), 0);
+    assert_int_equal(mkdir(GetDataDir(), 0700), 0);
+}
+
+static void test_symlink_loop_fails_closed(void)
+{
+    RemoveCMDBFile();
+
+    char path[CF_BUFSIZE];
+    CMDBFilePath(path, sizeof(path));
+    assert_int_equal(symlink(path, path), 0);
+    assert_int_equal(access(path, F_OK), -1);
+    assert_int_equal(errno, ELOOP);
+
+    EvalContext *ctx = EvalContextNew();
+    assert_false(LoadCMDBData(ctx));
+    assert_false(VariableIsInstalled(ctx, "data:variables.good_var"));
+    assert_false(ClassIsInstalled(ctx, "good_class"));
+    EvalContextDestroy(ctx);
+
+    RemoveCMDBFile();
+}
+
+static void test_dangling_symlink_fails_closed(void)
+{
+    RemoveCMDBFile();
+
+    char path[CF_BUFSIZE];
+    CMDBFilePath(path, sizeof(path));
+    char target[CF_BUFSIZE];
+    xsnprintf(target, sizeof(target), "%s/nonexistent_target.json",
+              GetDataDir());
+    unlink(target);
+
+    assert_int_equal(symlink(target, path), 0);
+    assert_int_equal(access(path, F_OK), -1);
+    assert_int_equal(errno, ENOENT);
+
+    struct stat sb;
+    assert_int_equal(lstat(path, &sb), 0);
+
+    EvalContext *ctx = EvalContextNew();
+    assert_false(LoadCMDBData(ctx));
+    assert_false(VariableIsInstalled(ctx, "data:variables.good_var"));
+    assert_false(ClassIsInstalled(ctx, "good_class"));
+    EvalContextDestroy(ctx);
+
+    RemoveCMDBFile();
+}
+
+static void test_directory_at_cmdb_path_fails_closed(void)
+{
+    /* Privilege-independent unreadable case (E4 D10 U2). */
+    RemoveCMDBFile();
+
+    char path[CF_BUFSIZE];
+    CMDBFilePath(path, sizeof(path));
+    assert_int_equal(mkdir(path, 0700), 0);
+    assert_int_equal(access(path, F_OK), 0);
+
+    EvalContext *ctx = EvalContextNew();
+    assert_false(LoadCMDBData(ctx));
+    assert_false(VariableIsInstalled(ctx, "data:variables.good_var"));
+    assert_false(ClassIsInstalled(ctx, "good_class"));
+    EvalContextDestroy(ctx);
+
+    assert_int_equal(rmdir(path), 0);
+}
+
+static void test_unsearchable_parent_dir_fails_closed(void)
+{
+    WriteCMDBFile(
+        "{ \"vars\": { \"good_var\": \"x\" },"
+        "  \"classes\": { \"good_class\": \"any::\" } }\n");
+
+    char path[CF_BUFSIZE];
+    CMDBFilePath(path, sizeof(path));
+    assert_int_equal(chmod(GetDataDir(), 0000), 0);
+
+    if (geteuid() == 0)
+    {
+        int acc_rc = access(path, F_OK);
+        int acc_err = (acc_rc != 0) ? errno : 0;
+        printf("SKIP_ROOT_PRECONDITION test=unsearchable_parent_dir "
+               "geteuid=%lu access_fok_rc=%d errno=%d\n",
+               (unsigned long) geteuid(), acc_rc, acc_err);
+        fflush(stdout);
+        assert_int_equal(chmod(GetDataDir(), 0700), 0);
+        RemoveCMDBFile();
+        return;
+    }
+
+    assert_int_equal(access(path, F_OK), -1);
+    assert_int_equal(errno, EACCES);
+
+    EvalContext *ctx = EvalContextNew();
+    assert_false(LoadCMDBData(ctx));
+    assert_false(VariableIsInstalled(ctx, "data:variables.good_var"));
+    assert_false(ClassIsInstalled(ctx, "good_class"));
+    EvalContextDestroy(ctx);
+
+    assert_int_equal(chmod(GetDataDir(), 0700), 0);
+    RemoveCMDBFile();
+}
+
+static void test_unreadable_file_fails_closed(void)
+{
+    /* Permission-denied file (E4 D10 U1). */
+    WriteCMDBFile(
+        "{ \"vars\": { \"good_var\": \"x\" },"
+        "  \"classes\": { \"good_class\": \"any::\" } }\n");
+
+    char path[CF_BUFSIZE];
+    CMDBFilePath(path, sizeof(path));
+    assert_int_equal(chmod(path, 0000), 0);
+
+    if (geteuid() == 0)
+    {
+        int acc_rc = access(path, R_OK);
+        int acc_err = (acc_rc != 0) ? errno : 0;
+        printf("SKIP_ROOT_PRECONDITION test=unreadable_file_u1 "
+               "geteuid=%lu access_rok_rc=%d errno=%d\n",
+               (unsigned long) geteuid(), acc_rc, acc_err);
+        fflush(stdout);
+        assert_int_equal(chmod(path, 0600), 0);
+        RemoveCMDBFile();
+        return;
+    }
+
+    assert_int_equal(access(path, F_OK), 0);
+    assert_int_equal(access(path, R_OK), -1);
+    assert_int_equal(errno, EACCES);
+
+    EvalContext *ctx = EvalContextNew();
+    assert_false(LoadCMDBData(ctx));
+    assert_false(VariableIsInstalled(ctx, "data:variables.good_var"));
+    assert_false(ClassIsInstalled(ctx, "good_class"));
+    EvalContextDestroy(ctx);
+
+    assert_int_equal(chmod(path, 0600), 0);
+    RemoveCMDBFile();
+}
+
 int main()
 {
     PRINT_TEST_BANNER();
@@ -834,6 +1005,12 @@ int main()
     const UnitTest tests[] =
     {
         unit_test(test_missing_file_is_not_an_error),
+        unit_test(test_non_directory_parent_is_not_an_error),
+        unit_test(test_symlink_loop_fails_closed),
+        unit_test(test_dangling_symlink_fails_closed),
+        unit_test(test_directory_at_cmdb_path_fails_closed),
+        unit_test(test_unsearchable_parent_dir_fails_closed),
+        unit_test(test_unreadable_file_fails_closed),
         unit_test(test_all_good_file_installs_everything),
         unit_test(test_bad_var_entry_installs_nothing),
         unit_test(test_bad_variables_entry_installs_nothing),

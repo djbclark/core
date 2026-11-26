@@ -1212,7 +1212,8 @@ static bool InstallCMDBPending(EvalContext *ctx, CMDBPending *pending)
  * see the file half-loaded: the guard's entry could be exactly the one
  * dropped, and the action would then run unguarded.
  *
- * An absent file is not an error. A top-level key other than 'vars',
+ * A genuinely absent file (ENOENT or ENOTDIR, not a dangling symlink or
+ * access error) is not an error. A top-level key other than 'vars',
  * 'variables' and 'classes' makes the file invalid, as does a section whose
  * value is not a JSON object (JSON null included), and two entries that
  * name the same variable (one would silently replace the other), or a
@@ -1225,8 +1226,32 @@ bool LoadCMDBData(EvalContext *ctx)
     JoinPaths(file_path, sizeof(file_path), HOST_SPECIFIC_DATA_FILE);
     if (access(file_path, F_OK) != 0)
     {
-        Log(LOG_LEVEL_VERBOSE, "No host-specific JSON data available at '%s'", file_path);
-        return true;            /* not an error */
+        int err = errno;
+        if (err == ENOENT || err == ENOTDIR)
+        {
+            /*
+             * access() follows symlinks, so a dangling symlink at file_path
+             * also fails with ENOENT (or ENOTDIR). Check lstat() so only a
+             * genuinely absent path, not a broken symlink, counts as absent.
+             */
+            struct stat sb;
+            if (lstat(file_path, &sb) != 0)
+            {
+                if (errno == ENOENT || errno == ENOTDIR)
+                {
+                    Log(LOG_LEVEL_VERBOSE,
+                        "No host-specific JSON data available at '%s'",
+                        file_path);
+                    return true;            /* not an error */
+                }
+                err = errno;
+            }
+        }
+        errno = err;
+        Log(LOG_LEVEL_ERR,
+            "Cannot access host-specific JSON data at '%s' (%s)",
+            file_path, GetErrorStr());
+        return false;
     }
     if (access(file_path, R_OK) != 0)
     {
