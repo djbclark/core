@@ -107,12 +107,8 @@ static void test_find_next_integer(void)
 }
 
 #ifdef __linux__
-/*
- * GetNetworkingInfo() reads /proc/<pid>/net/route, relocated here through
- * CFENGINE_TEST_OVERRIDE_PROCDIR, and must pick the active default route
- * with the lowest metric even when that route is listed last.
- */
-static void test_default_route_lowest_metric(void)
+static void assert_default_route_gateway(const char *routes_body,
+                                         const char *expected_gateway)
 {
     char procdir[] = "/tmp/sysinfo_test_proc.XXXXXX";
     assert_true(mkdtemp(procdir) != NULL);
@@ -125,10 +121,9 @@ static void test_default_route_lowest_metric(void)
     FILE *fp = fopen(route_file, "w");
     assert_true(fp != NULL);
     fputs("Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask"
-          "\t\tMTU\tWindow\tIRTT\n"
-          "eth0\t00000000\t0102A8C0\t0003\t0\t0\t600\t00000000\t0\t0\t0\n"
-          "eth1\t00000000\t0101A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0\n",
+          "\t\tMTU\tWindow\tIRTT\n",
           fp);
+    fputs(routes_body, fp);
     fclose(fp);
 
     setenv("CFENGINE_TEST_OVERRIDE_PROCDIR", procdir, 1);
@@ -142,13 +137,50 @@ static void test_default_route_lowest_metric(void)
     assert_true(inet != NULL);
     const char *gateway = JsonObjectGetAsString(inet, "default_gateway");
     assert_true(gateway != NULL);
-    assert_string_equal(gateway, "192.168.1.1");
+    assert_string_equal(gateway, expected_gateway);
 
     EvalContextDestroy(ctx);
     unsetenv("CFENGINE_TEST_OVERRIDE_PROCDIR");
     unsetenv("CFENGINE_TEST_OVERRIDE_PROCPID");
     DeleteDirectoryTree(procdir);
     rmdir(procdir);
+}
+
+/*
+ * GetNetworkingInfo() reads /proc/<pid>/net/route, relocated here through
+ * CFENGINE_TEST_OVERRIDE_PROCDIR, and must pick the active default route
+ * with the lowest metric even when that route is listed last.
+ */
+static void test_default_route_lowest_metric(void)
+{
+    assert_default_route_gateway(
+        "eth0\t00000000\t0102A8C0\t0003\t0\t0\t600\t00000000\t0\t0\t0\n"
+        "eth1\t00000000\t0101A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0\n",
+        "192.168.1.1");
+}
+
+/*
+ * Normative tie policy: when two active default routes share the same
+ * lowest metric, the earlier entry in /proc/<pid>/net/route wins.
+ */
+static void test_default_route_equal_metric_tie_earlier_wins(void)
+{
+    assert_default_route_gateway(
+        "eth0\t00000000\t0102A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0\n"
+        "eth1\t00000000\t0101A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0\n",
+        "192.168.2.1");
+}
+
+/*
+ * Control: when the lowest-metric active default route is listed first,
+ * it wins over a higher-metric later entry.
+ */
+static void test_default_route_lowest_first_control(void)
+{
+    assert_default_route_gateway(
+        "eth0\t00000000\t0102A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0\n"
+        "eth1\t00000000\t0101A8C0\t0003\t0\t0\t600\t00000000\t0\t0\t0\n",
+        "192.168.2.1");
 }
 #endif /* __linux__ */
 
@@ -161,6 +193,8 @@ int main()
         unit_test(test_find_next_integer),
 #ifdef __linux__
         unit_test(test_default_route_lowest_metric),
+        unit_test(test_default_route_equal_metric_tie_earlier_wins),
+        unit_test(test_default_route_lowest_first_control),
 #endif
     };
 

@@ -458,6 +458,7 @@ FILE *cf_popen_select(const char *command, const char *type, OutputSelect output
 
             if ((pp = fdopen(pd[0], type)) == NULL)
             {
+                close(pd[0]);
                 cf_pwait(pid);
                 ClearAlarmedPid(pid);
                 ArgFree(argv);
@@ -471,6 +472,7 @@ FILE *cf_popen_select(const char *command, const char *type, OutputSelect output
 
             if ((pp = fdopen(pd[1], type)) == NULL)
             {
+                close(pd[1]);
                 cf_pwait(pid);
                 ClearAlarmedPid(pid);
                 ArgFree(argv);
@@ -590,6 +592,7 @@ FILE *cf_popensetuid(const char *command, const Seq *arglist,
 
             if ((pp = fdopen(pd[0], type)) == NULL)
             {
+                close(pd[0]);
                 cf_pwait(pid);
                 ClearAlarmedPid(pid);
                 ArgFree(argv);
@@ -603,6 +606,7 @@ FILE *cf_popensetuid(const char *command, const Seq *arglist,
 
             if ((pp = fdopen(pd[1], type)) == NULL)
             {
+                close(pd[1]);
                 cf_pwait(pid);
                 ClearAlarmedPid(pid);
                 ArgFree(argv);
@@ -674,6 +678,7 @@ FILE *cf_popen_sh_select(const char *command, const char *type, OutputSelect out
 
             if ((pp = fdopen(pd[0], type)) == NULL)
             {
+                close(pd[0]);
                 cf_pwait(pid);
                 ClearAlarmedPid(pid);
                 return NULL;
@@ -686,6 +691,7 @@ FILE *cf_popen_sh_select(const char *command, const char *type, OutputSelect out
 
             if ((pp = fdopen(pd[1], type)) == NULL)
             {
+                close(pd[1]);
                 cf_pwait(pid);
                 ClearAlarmedPid(pid);
                 return NULL;
@@ -795,6 +801,7 @@ FILE *cf_popen_shsetuid(const char *command, const char *type,
 
             if ((pp = fdopen(pd[0], type)) == NULL)
             {
+                close(pd[0]);
                 cf_pwait(pid);
                 ClearAlarmedPid(pid);
                 return NULL;
@@ -807,6 +814,7 @@ FILE *cf_popen_shsetuid(const char *command, const char *type,
 
             if ((pp = fdopen(pd[1], type)) == NULL)
             {
+                close(pd[1]);
                 cf_pwait(pid);
                 ClearAlarmedPid(pid);
                 return NULL;
