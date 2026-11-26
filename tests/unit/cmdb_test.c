@@ -44,15 +44,20 @@ static void CMDBFilePath(char *path, size_t size)
     xsnprintf(path, size, "%s/host_specific.json", GetDataDir());
 }
 
-static void WriteCMDBFile(const char *json)
+static void WriteCMDBFileBytes(const char *bytes, size_t len)
 {
     char path[CF_BUFSIZE];
     CMDBFilePath(path, sizeof(path));
 
-    FILE *f = fopen(path, "w");
+    FILE *f = fopen(path, "wb");
     assert_true(f != NULL);
-    assert_true(fputs(json, f) >= 0);
+    assert_int_equal(fwrite(bytes, 1, len, f), len);
     assert_int_equal(fclose(f), 0);
+}
+
+static void WriteCMDBFile(const char *json)
+{
+    WriteCMDBFileBytes(json, strlen(json));
 }
 
 static void RemoveCMDBFile(void)
@@ -789,6 +794,38 @@ static void test_unknown_metadata_key_installs_nothing(void)
     RemoveCMDBFile();
 }
 
+static void test_embedded_nul_byte_installs_nothing(void)
+{
+    /* Loader-level proof that host_specific.json containing an embedded NUL
+     * byte (after a valid object or inside a string) is refused and installs
+     * nothing. */
+    const char trailing_nul[] =
+        "{ \"vars\": { \"good_var\": \"x\" },"
+        "  \"classes\": { \"good_class\": \"any::\" } }\0not-json";
+    const char inner_nul[] =
+        "{ \"vars\": { \"good_var\": \"a\0b\" },"
+        "  \"classes\": { \"good_class\": \"any::\" } }\n";
+    const struct
+    {
+        const char *bytes;
+        size_t len;
+    } cases[] = {
+        { trailing_nul, sizeof(trailing_nul) - 1 },
+        { inner_nul, sizeof(inner_nul) - 1 },
+    };
+
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
+    {
+        WriteCMDBFileBytes(cases[i].bytes, cases[i].len);
+        EvalContext *ctx = EvalContextNew();
+        assert_false(LoadCMDBData(ctx));
+        assert_false(VariableIsInstalled(ctx, "data:variables.good_var"));
+        assert_false(ClassIsInstalled(ctx, "good_class"));
+        EvalContextDestroy(ctx);
+        RemoveCMDBFile();
+    }
+}
+
 int main()
 {
     PRINT_TEST_BANNER();
@@ -821,6 +858,7 @@ int main()
         unit_test(test_repeated_member_or_trailing_input_installs_nothing),
         unit_test(test_whitespace_after_document_is_fine),
         unit_test(test_unknown_metadata_key_installs_nothing),
+        unit_test(test_embedded_nul_byte_installs_nothing),
     };
 
     int ret = run_tests(tests);
