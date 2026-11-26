@@ -738,6 +738,57 @@ static void test_whitespace_after_document_is_fine(void)
     RemoveCMDBFile();
 }
 
+static void test_unknown_metadata_key_installs_nothing(void)
+{
+    /* Unknown keys inside 'classes' or 'variables' metadata objects (such as
+     * a misspelled 'class_expression' or 'tag') must fail the whole file,
+     * installing nothing. */
+    const char *const absent[] = {
+        "data:variables.good_var", "data:variables.x", NULL
+    };
+    const char *const absent_class[] = { "good_class", "maint", NULL };
+    const char *const files[] = {
+        /* misspelled 'class_expression' (singular) */
+        "{ \"vars\": { \"good_var\": \"x\" },\n"
+        "  \"classes\": { \"good_class\": \"any::\",\n"
+        "                 \"maint\": { \"class_expression\": [\"!prod::\"] } } }\n",
+        /* misspelled 'tag' (singular) in variables */
+        "{ \"vars\": { \"good_var\": \"x\" },\n"
+        "  \"variables\": { \"x\": { \"value\": \"1\", \"tag\": [\"t1\"] } },\n"
+        "  \"classes\": { \"good_class\": \"any::\" } }\n",
+        /* extra unknown key alongside valid class metadata */
+        "{ \"vars\": { \"good_var\": \"x\" },\n"
+        "  \"classes\": { \"good_class\": \"any::\",\n"
+        "                 \"maint\": { \"class_expressions\": [\"any::\"],\n"
+        "                              \"unknown\": true } } }\n",
+        /* extra unknown key alongside valid variable metadata */
+        "{ \"vars\": { \"good_var\": \"x\" },\n"
+        "  \"variables\": { \"x\": { \"value\": \"1\", \"unknown\": true } },\n"
+        "  \"classes\": { \"good_class\": \"any::\" } }\n",
+        NULL
+    };
+
+    for (size_t i = 0; files[i] != NULL; i++)
+    {
+        assert_rejected_and_nothing_installed(files[i], absent, absent_class);
+    }
+
+    /* Positive control: all valid metadata keys still load cleanly. */
+    WriteCMDBFile(
+        "{ \"variables\": { \"x\": { \"value\": \"1\", \"tags\": [\"t1\"],"
+        "                            \"comment\": \"ok\" } },\n"
+        "  \"classes\": { \"maint\": { \"class_expressions\": [\"any::\"],"
+        "                              \"regular_expressions\": [\"any\"],"
+        "                              \"tags\": [\"t2\"],"
+        "                              \"comment\": \"ok\" } } }\n");
+    EvalContext *ctx = EvalContextNew();
+    assert_true(LoadCMDBData(ctx));
+    assert_string_equal(InstalledScalar(ctx, "data:variables.x"), "1");
+    assert_true(ClassIsInstalled(ctx, "maint"));
+    EvalContextDestroy(ctx);
+    RemoveCMDBFile();
+}
+
 int main()
 {
     PRINT_TEST_BANNER();
@@ -769,6 +820,7 @@ int main()
         unit_test(test_failed_class_insertion_rolls_back_everything),
         unit_test(test_repeated_member_or_trailing_input_installs_nothing),
         unit_test(test_whitespace_after_document_is_fine),
+        unit_test(test_unknown_metadata_key_installs_nothing),
     };
 
     int ret = run_tests(tests);
