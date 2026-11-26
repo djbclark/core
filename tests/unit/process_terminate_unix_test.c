@@ -35,14 +35,35 @@ bool has_int;
 bool has_term;
 bool has_kill;
 
+/* Matching constants from libpromises/process_unix.c */
+#define TEST_SLEEP_POLL_TIMEOUT_NS 10000000LL
+#define TEST_STOP_WAIT_TIMEOUT_NS 999999999LL
+
+typedef struct
+{
+    int sig;
+    time_t time_ns;
+} SignalEvent;
+
+#define MAX_SIGNAL_EVENTS 32
+
 /* History */
 
 bool was_stopped;
 int exit_signal;
 
+static SignalEvent signal_events[MAX_SIGNAL_EVENTS];
+static size_t signal_event_count;
+static bool got_eintr;
+static int eintr_count;
+static time_t nanosleep_slack_ns;
+
 void InitTime(void)
 {
     current_time = 1;
+    got_eintr = false;
+    eintr_count = 0;
+    nanosleep_slack_ns = 0;
 }
 
 void InitFakeProcess(time_t start_time, time_t reaction_time,
@@ -66,6 +87,7 @@ void InitFakeProcess(time_t start_time, time_t reaction_time,
 
     was_stopped = false;
     exit_signal = 0;
+    signal_event_count = 0;
 }
 
 time_t GetProcessStartTime(pid_t pid)
@@ -213,6 +235,13 @@ int kill(pid_t pid, int signal)
         return -1;
     }
 
+    if (signal_event_count < MAX_SIGNAL_EVENTS)
+    {
+        signal_events[signal_event_count].sig = signal;
+        signal_events[signal_event_count].time_ns = current_time;
+        signal_event_count++;
+    }
+
     FakeProcessDoSignals();
 
     return 0;
@@ -224,17 +253,16 @@ int nanosleep(const struct timespec *req, struct timespec *rem)
 
     /* Simulate EINTR every second time */
 
-    static bool got_eintr = false;
-
     if (!got_eintr)
     {
         got_eintr = true;
+        eintr_count++;
         sleep_time = 2 * req->tv_nsec / 3;
     }
     else
     {
         got_eintr = false;
-        sleep_time = req->tv_nsec;
+        sleep_time = req->tv_nsec + nanosleep_slack_ns;
     }
 
     time_t next_time = current_time + sleep_time;
@@ -321,6 +349,65 @@ void test_kill_long_reacting_signal(void)
 
     /* This process is not even reacting to SIGKILL. */
     assert_true(exists);
+    assert_false(stopped);
+}
+
+static void assert_elapsed_budget_ladder(time_t slack_ns)
+{
+    InitTime();
+    nanosleep_slack_ns = slack_ns;
+    const time_t start_time = current_time;
+    InitFakeProcess(12345, 2100000000, true, true, true);
+
+    int res = GracefulTerminate(1, 12345);
+    assert_true(res);
+    assert_false(stopped);
+    assert_true(eintr_count > 0);
+
+    /* SafeKill sends SIGSTOP, <signal>, SIGCONT for each ladder stage:
+     * SIGINT, then SIGTERM, then SIGKILL. */
+    const int expected_sigs[9] = {
+        SIGSTOP, SIGINT, SIGCONT,
+        SIGSTOP, SIGTERM, SIGCONT,
+        SIGSTOP, SIGKILL, SIGCONT,
+    };
+    assert_int_equal((int) signal_event_count, 9);
+    for (size_t i = 0; i < 9; i++)
+    {
+        assert_int_equal(signal_events[i].sig, expected_sigs[i]);
+    }
+
+    const int64_t stage1_ns =
+        (int64_t) (signal_events[4].time_ns - signal_events[1].time_ns);
+    const int64_t stage2_ns =
+        (int64_t) (signal_events[7].time_ns - signal_events[4].time_ns);
+    const int64_t total_ns = (int64_t) (current_time - start_time);
+
+    assert_true(stage1_ns >= TEST_STOP_WAIT_TIMEOUT_NS);
+    assert_true(stage1_ns <=
+                TEST_STOP_WAIT_TIMEOUT_NS + TEST_SLEEP_POLL_TIMEOUT_NS);
+
+    assert_true(stage2_ns >= TEST_STOP_WAIT_TIMEOUT_NS);
+    assert_true(stage2_ns <=
+                TEST_STOP_WAIT_TIMEOUT_NS + TEST_SLEEP_POLL_TIMEOUT_NS);
+
+    assert_true(total_ns >= 2 * TEST_STOP_WAIT_TIMEOUT_NS);
+    assert_true(total_ns <=
+                2 * TEST_STOP_WAIT_TIMEOUT_NS + TEST_SLEEP_POLL_TIMEOUT_NS);
+}
+
+static void test_kill_elapsed_budget_under_eintr(void)
+{
+    assert_elapsed_budget_ladder(0);
+}
+
+static void test_kill_elapsed_budget_under_sleep_overshoot(void)
+{
+    /* Each completed poll overshoots by 4ms (simulating coarse kernel timer
+     * granularity). Deadline-based polling stays within one poll quantum of
+     * STOP_WAIT_TIMEOUT per stage; iteration counting would overshoot by ~400ms
+     * per stage. */
+    assert_elapsed_budget_ladder(4000000);
 }
 
 void test_kill_no_sigint(void)
@@ -380,6 +467,8 @@ int main()
         unit_test(test_kill_simple_process),
         unit_test(test_kill_wrong_process),
         unit_test(test_kill_long_reacting_signal),
+        unit_test(test_kill_elapsed_budget_under_eintr),
+        unit_test(test_kill_elapsed_budget_under_sleep_overshoot),
         unit_test(test_kill_no_sigint),
         unit_test(test_kill_no_sigint_sigterm),
         unit_test(test_kill_anothers_process),
