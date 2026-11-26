@@ -183,6 +183,14 @@ endif
 # wait for there.
 if !NT
 check_PROGRAMS += timeout_test
+check_PROGRAMS += pipes_fdopen_fail_test
+check_PROGRAMS += verify_exec_timeout_test
+
+pipes_fdopen_fail_test_SOURCES = pipes_fdopen_fail_test.c
+pipes_fdopen_fail_test_LDADD = ../../libpromises/libpromises.la libtest.la
+
+verify_exec_timeout_test_SOURCES = verify_exec_timeout_test.c
+verify_exec_timeout_test_LDADD = ../../cf-agent/libcf-agent.la libtest.la
 endif
 
 check_SCRIPTS = dynamic_dependency_test.sh \
