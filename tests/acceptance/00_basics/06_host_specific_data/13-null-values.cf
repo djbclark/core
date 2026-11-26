@@ -1,6 +1,6 @@
-# test of the host_specific.json functionality: JSON null values are rejected
-# per entry, the rest of the CMDB data is still installed (used to crash);
-# lists containing null keep installing, with the nulls skipped
+# test of the host_specific.json functionality: JSON null scalar values are
+# rejected (used to crash), every one is reported, and since one invalid entry
+# makes the loader install nothing, no entries from the file are installed
 body common control
 {
   inputs => { "../../default.sub.cf" };
@@ -37,25 +37,23 @@ bundle agent check
     "command"
       string => "$(sys.cf_promises) --show-vars -f $(sys.inputdir)/promises.cf | $(G.grep) -E 'CMDB data|value_from_|null_'";
 
-    # The offending entries are reported in the order they appear in the CMDB
-    # data, the remaining variables are installed and shown by --show-vars;
-    # lists with a null still install with the nulls skipped (RlistFromContainer()
-    # drops them), exactly as before the null values were rejected.
+    # Only the scalar null entries are reported as errors (lists containing
+    # null and containers with nested null stay valid), and the file is
+    # rejected as a whole so nothing is installed.
     "expected"
       string => concat(
         "\s*error: Invalid value in 'null_scalar'.*null is not a supported value.*",
         "\s+error: Invalid value in 'null_value'.*null is not a supported value.*",
         "\s+error: Invalid value in 'null_bare'.*null is not a supported value.*",
-        "\s+data:variables\.good_variables\s+value_from_variables\s+source=cmdb",
-        "\s+data:variables\.good_vars\s+value_from_vars\s+source=cmdb",
-        "\s+data:variables\.null_container\s+\{\s*\"nested\":\s*null\s*\}\s+source=cmdb",
-        "\s+data:variables\.null_list\s+\{\"a\"\}\s+source=cmdb",
-        "\s+data:variables\.null_value_list\s+\{\"a\"\}\s+source=cmdb\s*"
+        "\s+error: CMDB data file '.*host_specific\.json' has invalid entries.*installing none of its contents.*"
       );
 
   methods:
     ""
       usebundle => dcs_passif_output(
-        $(expected), "", $(command), $(this.promise_filename)
+        $(expected),
+        ".*(value_from_|data:variables\.null_|null_list|null_value_list).*",
+        $(command),
+        $(this.promise_filename)
       );
 }
