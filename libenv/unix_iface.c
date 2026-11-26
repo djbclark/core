@@ -1440,7 +1440,10 @@ void GetNetworkingInfo(EvalContext *ctx)
                     /* Not JsonPrimitiveGetAsInteger(): it reaches
                      * StringToLongExitOnError(), which would terminate the
                      * agent over a metric too large for a long. A metric we
-                     * cannot read simply does not win. */
+                     * cannot read simply does not win.
+                     *
+                     * Tie policy: equal-metric default routes keep the
+                     * earlier entry in /proc/<pid>/net/route (strict '<'). */
                     long metric_value;
                     if (StringToLong(JsonPrimitiveGetAsString(metric),
                                      &metric_value) == 0 &&
