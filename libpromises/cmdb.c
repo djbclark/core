@@ -690,6 +690,32 @@ static inline const char *GetCMDBComment(const char *item_type, const char *iden
     return JsonPrimitiveGetAsString(json_comment);
 }
 
+static bool CheckCMDBMetadataKeys(const JsonElement *obj,
+                                  const char *item_type,
+                                  const char *identifier,
+                                  const char *const allowed_keys[],
+                                  const char *allowed_desc)
+{
+    assert(obj != NULL);
+    assert(JsonGetType(obj) == JSON_TYPE_OBJECT);
+
+    bool valid = true;
+    JsonIterator meta_iter = JsonIteratorInit(obj);
+    while (JsonIteratorHasMore(&meta_iter))
+    {
+        const char *meta_key = JsonIteratorNextKey(&meta_iter);
+        if (!IsStrIn(meta_key, allowed_keys))
+        {
+            Log(LOG_LEVEL_ERR,
+                "Invalid key '%s' in CMDB %s specification '%s'"
+                " (only %s are allowed)",
+                meta_key, item_type, identifier, allowed_desc);
+            valid = false;
+        }
+    }
+    return valid;
+}
+
 /**
  * Validate the 'variables' section, which uses the new format allowing
  * metadata (CFE-3633). Same contract as PrepareCMDBVars().
@@ -734,6 +760,19 @@ static bool PrepareCMDBVariables(JsonElement *variables, const char *file_path,
 
         if (JsonGetType(var_info) == JSON_TYPE_OBJECT)
         {
+            const char *const allowed_var_keys[] = {
+                CMDB_VARIABLES_DATA,
+                CMDB_VARIABLES_TAGS,
+                CMDB_COMMENT_KEY,
+                NULL
+            };
+            if (!CheckCMDBMetadataKeys(var_info, "variable", key,
+                                       allowed_var_keys,
+                                       "'value', 'tags' and 'comment'"))
+            {
+                entry_valid = false;
+            }
+
             data = JsonObjectGet(var_info, CMDB_VARIABLES_DATA);
 
             if (data == NULL)
@@ -945,6 +984,21 @@ static bool PrepareCMDBClasses(JsonElement *classes, const char *file_path,
         }
         else if (JsonGetContainerType(data) == JSON_CONTAINER_TYPE_OBJECT)
         {
+            bool entry_valid = true;
+            const char *const allowed_class_keys[] = {
+                CMDB_CLASSES_CLASS_EXPRESSIONS,
+                CMDB_CLASSES_REGULAR_EXPRESSIONS,
+                CMDB_CLASSES_TAGS,
+                CMDB_COMMENT_KEY,
+                NULL
+            };
+            if (!CheckCMDBMetadataKeys(
+                    data, "class", key, allowed_class_keys,
+                    "'class_expressions', 'regular_expressions', 'tags' and 'comment'"))
+            {
+                entry_valid = false;
+            }
+
             const JsonElement *class_exprs = JsonObjectGet(data, CMDB_CLASSES_CLASS_EXPRESSIONS);
             const JsonElement *reg_exprs = JsonObjectGet(data, CMDB_CLASSES_REGULAR_EXPRESSIONS);
             const JsonElement *json_tags = JsonObjectGet(data, CMDB_CLASSES_TAGS);
@@ -968,7 +1022,6 @@ static bool PrepareCMDBClasses(JsonElement *classes, const char *file_path,
                 continue;
             }
 
-            bool entry_valid = true;
             tags = GetTagsFromJsonTags("class", key, json_tags, CMDB_SOURCE_TAG, &entry_valid);
             comment = GetCMDBComment("class", key, data, &entry_valid);
             if (!entry_valid)
